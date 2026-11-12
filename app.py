@@ -8,7 +8,7 @@ from engine import prepare,simulate
 
 st.set_page_config(page_title='스윙 4.4',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
 st.markdown('''<style>.block-container{padding:0.7rem 0.6rem 2rem;max-width:1200px}h1{font-size:1.65rem!important}h2,h3{font-size:1.2rem!important}div[data-testid="stPlotlyChart"]{overflow:hidden}@media(max-width:600px){.stRadio>div{gap:.3rem}}</style>''',unsafe_allow_html=True)
-st.title('📈 스윙 매매 4.4.1')
+st.title('📈 스윙 매매 4.4.2')
 st.caption('가격·지지저항 중심 | 거래량 가점 | 30/30/40 분할 매도 | 연구용')
 with st.expander('⚙️ 종목 및 백테스트 설정',expanded=True):
     ticker=st.text_input('종목코드',value='373220.KS').strip().upper()
@@ -45,6 +45,7 @@ st.info(f'최근 일봉: {d.index[-1]:%Y-%m-%d} | 종가 {last.Close:,.0f} | 매
 st.caption('당일 종가 확정 후 신호 평가. 실시간 장중 데이터는 확정 신호가 아닙니다.')
 show=st.radio('차트 표시',['핵심만','지지·저항 추가','모든 지표'],horizontal=True)
 markers=st.checkbox('후보 신호 표시',value=False)
+precise=st.checkbox('봉 위치 강조 + 체결 가격 라벨',value=True,help='매수·매도 마커를 해당 봉의 실제 시가에 찍고 봉을 세로선으로 강조합니다.')
 n={'3개월':65,'6개월':130,'1년':260,'전체':len(d)}[view]
 p=d.tail(n);x=p.index.strftime('%Y-%m-%d').tolist()
 fig=go.Figure()
@@ -61,24 +62,58 @@ if show=='모든 지표':
     for f in [.236,.382,.5,.618]:line(f'fib_{f}',f'Fib {f}','#a7a7a7',1,'dot')
     line('weekly_prior_high','주봉 전고점','#bd6c48',1.3,'dash')
     line('weekly_bb_upper','주봉 BB 상단','#ad9244',1.3,'dot')
-def mark(dates,values,name,color,symbol,size=11,outline=False):
+def mark(dates,values,name,color,symbol,size=11,outline=False,custom=None):
     if len(dates)==0:return
-    fig.add_trace(go.Scatter(x=pd.DatetimeIndex(pd.to_datetime(dates)).strftime('%Y-%m-%d').tolist(),y=values,mode='markers',name=name,marker=dict(symbol=symbol,size=size,color='rgba(255,255,255,0.15)' if outline else color,line=dict(color=color,width=2 if outline else 1)),hovertemplate='%{x}<br>'+name+'<extra></extra>'))
+    xx=pd.DatetimeIndex(pd.to_datetime(dates)).strftime('%Y-%m-%d').tolist()
+    kw=dict(x=xx,y=values,mode='markers',name=name,
+        marker=dict(symbol=symbol,size=size,color='rgba(255,255,255,0.15)' if outline else color,
+                    line=dict(color=color,width=2 if outline else 1)))
+    if custom is not None:
+        kw['customdata']=custom
+        kw['hovertemplate']='%{x}<br>'+name+'<br>가격: %{y:,.0f}<br>%{customdata}<extra></extra>'
+    else:
+        kw['hovertemplate']='%{x}<br>'+name+'<br>가격: %{y:,.0f}<extra></extra>'
+    fig.add_trace(go.Scatter(**kw))
+
 if markers:
     buy=p[p.buy_candidate];sell=p[p.sell_candidate]
-    mark(buy.index,buy.Low*.98,'매수 관심','#13a074','circle-open',8,True)
-    mark(sell.index,sell.High*1.02,'매도 관심','#d99a2b','circle-open',8,True)
-confirmed=p[p.buy_confirmed];mark(confirmed.index,confirmed.Low*.965,'매수 확정','#13995c','triangle-up-open',12,True)
+    mark(buy.index,buy.Close,'매수 관심','#13a074','circle-open',8,True)
+    mark(sell.index,sell.Close,'매도 관심','#d99a2b','circle-open',8,True)
+confirmed=p[p.buy_confirmed]
+mark(confirmed.index,confirmed.Close,'매수 확정 (종가)','#13995c','triangle-up-open',12,True)
+
+# 체결 마커는 봉에서 떨어진 임의 위치가 아닌 '해당 거래일 시가'에 정확히 배치.
+# 각 체결 봉의 얇은 수직 점선은 해당 봉을 찾기 위한 시각적 안내선.
 if not ev.empty:
-    for action,color,symbol in [('매수','#13995c','triangle-up'),('1차 30% 매도','#dfaa25','circle'),('2차 30% 매도','#ed7e2b','diamond'),('잔여 청산','#d44949','x')]:
-        e=ev[(ev.action==action)&(ev.date.isin(p.index))]
+    event_specs=[
+        ('매수','#13995c','triangle-up','매수'),
+        ('1차 30% 매도','#dfaa25','circle','1차 30%'),
+        ('2차 30% 매도','#ed7e2b','diamond','2차 30%'),
+        ('잔여 청산','#d44949','x','잔여 청산'),
+    ]
+    for action,color,symbol,short in event_specs:
+        e=ev[(ev.action==action)&(ev.date.isin(p.index))].copy()
         if e.empty:continue
-        ys=[float(p.loc[t,'Low']*.945 if action=='매수' else p.loc[t,'High']*1.055) for t in e.date]
-        mark(e.date,ys,'모의 '+action,color,symbol,14)
-fig.update_layout(height=510,margin=dict(l=0,r=2,t=10,b=15),xaxis=dict(type='category',nticks=5,rangeslider_visible=False),yaxis=dict(side='right',tickformat=',.0f',automargin=True),legend=dict(orientation='h',y=-.16,font=dict(size=10)),hovermode='x unified',dragmode='pan',uirevision=f'{ticker}-{view}-{show}')
+        prices=e.price.astype(float).tolist()
+        details=['신호일: '+pd.Timestamp(t).strftime('%Y-%m-%d') for t in e.signal_date]
+        mark(e.date,prices,'모의 '+action,color,symbol,15,custom=details)
+        if precise:
+            for _,r in e.iterrows():
+                date=pd.Timestamp(r.date).strftime('%Y-%m-%d')
+                fig.add_shape(type='line',xref='x',yref='y',
+                    x0=date,x1=date,y0=float(p.loc[r.date,'Low']),y1=float(p.loc[r.date,'High']),
+                    line=dict(color=color,width=2,dash='dot'),layer='above')
+                fig.add_annotation(x=date,y=float(r.price),xref='x',yref='y',
+                    text=short+'<br>'+f'{float(r.price):,.0f}',
+                    showarrow=True,arrowhead=2,arrowsize=.7,arrowwidth=1.2,arrowcolor=color,
+                    ax=0,ay=36 if action=='매수' else -42,
+                    font=dict(size=10,color=color),
+                    bgcolor='rgba(255,255,255,.88)',bordercolor=color,borderwidth=.7,
+                    borderpad=2,opacity=.95)
+fig.update_layout(height=590 if precise else 510,margin=dict(l=0,r=2,t=45,b=25),xaxis=dict(type='category',nticks=5,rangeslider_visible=False),yaxis=dict(side='right',tickformat=',.0f',automargin=True),legend=dict(orientation='h',y=-.16,font=dict(size=10)),hovermode='x unified',dragmode='pan',uirevision=f'{ticker}-{view}-{show}')
 st.subheader('① 일봉과 매매 신호')
-st.plotly_chart(fig,use_container_width=True,config={'displaylogo':False,'scrollZoom':True,'responsive':True},key='price44')
-st.caption('빈 마커=조건 후보·확정, 채운 마커=실제 모의 체결. 체결은 신호 다음 거래일 시가. 후보 표시는 기본 꺼짐.')
+st.plotly_chart(fig,use_container_width=True,config={'displaylogo':False,'scrollZoom':True,'responsive':True},key='price442')
+st.caption('빈 마커=신호 당일 종가 / 채운 마커=다음 거래일 실제 모의 체결 시가. 세로 점선은 체결 봉, 숫자는 체결가입니다. 겹치면 차트를 확대하거나 ‘봉 위치 강조’를 끄세요.')
 st.subheader('② 스토캐스틱 (보조 참고만)')
 tabs=st.tabs(['5·3·3','10·6·6','20·12·12'])
 for tab,num in zip(tabs,[5,10,20]):
