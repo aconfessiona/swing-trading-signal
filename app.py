@@ -6,9 +6,9 @@ import streamlit as st
 import yfinance as yf
 from engine import prepare,simulate
 
-st.set_page_config(page_title='스윙 4.4',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
+st.set_page_config(page_title='스윙 4.6',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
 st.markdown('''<style>.block-container{padding:0.7rem 0.6rem 2rem;max-width:1200px}h1{font-size:1.65rem!important}h2,h3{font-size:1.2rem!important}div[data-testid="stPlotlyChart"]{overflow:hidden}@media(max-width:600px){.stRadio>div{gap:.3rem}}</style>''',unsafe_allow_html=True)
-st.title('📈 스윙 매매 4.5.0')
+st.title('📈 스윙 매매 4.6.0')
 st.caption('가격·지지저항 중심 | 거래량 가점 | 30/30/40 분할 매도 | 연구용')
 with st.expander('⚙️ 종목 및 백테스트 설정',expanded=True):
     ticker=st.text_input('종목코드',value='373220.KS').strip().upper()
@@ -17,7 +17,7 @@ with st.expander('⚙️ 종목 및 백테스트 설정',expanded=True):
     view=b.selectbox('차트 표시',['3개월','6개월','1년','전체'],index=1)
     c,e=st.columns(2)
     fee=c.number_input('편도 비용 (bp)',min_value=0,max_value=200,value=15,step=5)
-    hold=e.slider('최대 보유 거래일',10,80,40)
+    hold=e.slider('보유기간 참고값 (자동 청산 없음)',10,80,40)
     atr=st.slider('ATR 보호 청산 배수',1.5,4.5,2.5,.25)
 @st.cache_data(ttl=1800,show_spinner=False)
 def load(symbol,years):
@@ -46,7 +46,8 @@ st.caption('당일 종가 확정 후 신호 평가. 실시간 장중 데이터�
 show=st.radio('차트 표시',['핵심만','지지·저항 추가','모든 지표'],horizontal=True)
 markers=st.checkbox('후보 신호 표시 (분석용)',value=False)
 all_trades=st.checkbox('모든 체결 마커 표시',value=False,help='기본은 선택한 체결만 차트에 표시합니다.')
-trade_ev=ev[ev.date.isin(d.tail({'3개월':65,'6개월':130,'1년':260,'전체':len(d)}[view]).index)].copy() if not ev.empty else pd.DataFrame()
+visible_ev=ev[ev.action!='잔여 청산'].copy() if not ev.empty else ev.copy()
+trade_ev=visible_ev[visible_ev.date.isin(d.tail({'3개월':65,'6개월':130,'1년':260,'전체':len(d)}[view]).index)].copy() if not visible_ev.empty else pd.DataFrame()
 # 선택 메뉴에는 기간 내 전체 거래를 제공하되, 기본 차트는 체결 마커를 표시하지 않습니다.
 options=['선택 안 함']
 if not trade_ev.empty:
@@ -96,7 +97,6 @@ if not trade_ev.empty:
         ('매수','#13995c','triangle-up'),
         ('1차 30% 매도','#dfaa25','circle'),
         ('2차 30% 매도','#ed7e2b','diamond'),
-        ('잔여 청산','#d44949','x'),
     ]
     for action,color,symbol in event_specs:
         e=trade_ev[trade_ev.action==action] if all_trades else trade_ev.iloc[0:0]
@@ -118,7 +118,7 @@ if not trade_ev.empty:
 fig.update_layout(height=490,margin=dict(l=0,r=2,t=12,b=20),xaxis=dict(type='category',nticks=5,rangeslider_visible=False),yaxis=dict(side='right',tickformat=',.0f',automargin=True),legend=dict(orientation='h',y=-.16,font=dict(size=10)),hovermode='x unified',dragmode='pan',uirevision=f'{ticker}-{view}-{show}')
 st.subheader('① 일봉과 매매 신호')
 st.plotly_chart(fig,use_container_width=True,config={'displaylogo':False,'scrollZoom':True,'responsive':True},key='price450')
-st.caption('기본은 깨끗한 가격 차트입니다. 위 ‘강조할 모의 체결’에서 거래를 선택하면 해당 체결 봉 하나만 강조합니다. ‘모든 체결 마커 표시’는 필요할 때만 켜세요. 신호일 종가 → 다음 거래일 시가 체결.')
+st.caption('청산 표시는 숨겼지만 손절·위험 청산은 백테스트 수익률에 계속 반영됩니다. 기본은 깨끗한 가격 차트입니다. 위 ‘강조할 모의 체결’에서 거래를 선택하면 해당 체결 봉 하나만 강조합니다. ‘모든 체결 마커 표시’는 필요할 때만 켜세요. 신호일 종가 → 다음 거래일 시가 체결.')
 st.subheader('② 스토캐스틱 (보조 참고만)')
 tabs=st.tabs(['5·3·3','10·6·6','20·12·12'])
 for tab,num in zip(tabs,[5,10,20]):
@@ -134,9 +134,9 @@ recent=d.tail(45)
 recent_signals=recent[recent.buy_confirmed|recent.sell_confirmed][['Close','buy_confirmed','sell_confirmed','buy_score']].tail(12).copy()
 recent_signals.columns=['종가','매수 확정','매도 확정','매수 점수']
 st.dataframe(recent_signals.iloc[::-1],use_container_width=True)
-if ev.empty:st.write('모의 체결 기록이 없습니다. 후보와 실제 체결은 다릅니다.')
+if visible_ev.empty:st.write('모의 체결 기록이 없습니다. 후보와 실제 체결은 다릅니다.')
 else:
-    t=ev.tail(20).iloc[::-1].copy()
+    t=visible_ev.tail(20).iloc[::-1].copy()
     for col in ['date','signal_date']:t[col]=pd.to_datetime(t[col]).dt.strftime('%Y-%m-%d')
     t['price']=t.price.round(2)
     st.dataframe(t,use_container_width=True,hide_index=True)
@@ -147,4 +147,4 @@ if len(eq):
     c1.metric('총수익률',f'{(eq.iloc[-1]-1)*100:.2f}%')
     c2.metric('최대낙폭',f'{dd:.2f}%')
     c3.metric('현재 보유','예' if opened else '아니오')
-st.warning('교육·연구용입니다. 실제 주문 없음. 수수료는 편도 적용하며 슬리피지·세금·갭·미체결·배당 등은 완전히 반영되지 않습니다. 특정 고점/저점을 사후에 맞추는 방식이 아니며, 과거 성과는 미래 수익을 보장하지 않습니다.')
+st.warning('교육·연구용입니다. 매수는 지지 후 확인을 기다리므로 바닥보다 늦을 수 있으며, 매도는 저항 반응을 기다리므로 고점을 놓칠 수 있습니다. 청산 기록을 숨겨도 백테스트 계산에서는 제외되지 않습니다.  실제 주문 없음. 수수료는 편도 적용하며 슬리피지·세금·갭·미체결·배당 등은 완전히 반영되지 않습니다. 특정 고점/저점을 사후에 맞추는 방식이 아니며, 과거 성과는 미래 수익을 보장하지 않습니다.')

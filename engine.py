@@ -77,22 +77,36 @@ def prepare(raw):
     d['breakout_retest']=(d.Close>d.resistance.shift(1)*.985)&(d.Low<=d.resistance.shift(1)*1.025)&(d.Close>d.Open)
     # Prevent a chased entry near resistance or after a fast spike.
     d['overextended']=(d.Close>d.MA20*1.085)|(c/c.shift(5)>1.13)|(d.RSI14>73)
-    # Price structure first: a single BB touch in a strong downtrend is NOT a buy.
-    # Avoid buying into falling knives; require a reclaim/confirmed reversal or trend pullback.
-    recovering=(c>d.MA20)&(d.MA20>=d.MA20.shift(3))&(c>c.shift(3))
-    higher_low=(d.Low.rolling(5).min()>d.Low.shift(5).rolling(15).min())&(c>c.shift(3))
-    base_reversal=(d.support_hits>=2)&(d.reversal_candle)&(recovering|higher_low)
-    uptrend_pullback=d.uptrend&d.pullback&d.reversal_candle&(c>=d.MA20*.985)
-    retest=d.breakout_retest&d.reversal_candle&(c>d.MA20)&(d.MA20>=d.MA20.shift(5))
+    # Balanced entry: never buy merely on an oversold reading or a single support touch.
+    # Confirmation requires a prior test, recovery above a recent high, and an improving base.
+    recent_support=d.support_hits.shift(1).rolling(8,min_periods=1).max().fillna(0)>=1
+    swing_low=d.Low.shift(1).rolling(12,min_periods=6).min()
+    older_low=d.Low.shift(13).rolling(18,min_periods=8).min()
+    stabilizing=(swing_low>=older_low*.975)&(c>c.shift(3))
+    confirmation=(c>d.High.shift(1))&(c>d.Open)&(c>c.shift(2))
+    recovery=(c>d.MA20)&(d.MA20>=d.MA20.shift(4)*.995)
+    # Uptrend pullback: reclaim prior day's high near a rising MA20, without chasing.
+    pullback_recent=(d.Low.shift(1).rolling(6,min_periods=3).min()<=d.MA20.shift(1).rolling(6,min_periods=3).max()*1.015)
+    uptrend_pullback=d.uptrend&pullback_recent&confirmation&(c>d.MA20)&(c>d.MA60)
+    # Base reversal: wait for a higher low AND an MA20 reclaim, not the first falling-knife bounce.
+    base_reversal=recent_support&stabilizing&confirmation&recovery
+    # Breakout-retest: resistance level must have been crossed earlier, then tested as support.
+    level=d.resistance.shift(3)
+    breakout_seen=(d.Close.shift(1).rolling(5,min_periods=2).max()>level*1.015)
+    retest=breakout_seen&(d.Low<=level*1.025)&(d.Low>=level*.965)&confirmation&(c>level)&(c>d.MA20)
     d['buy_candidate']=((d.support_hits>=1)|d.pullback|d.breakout_retest)&~d.overextended
     d['buy_confirmed']=(base_reversal|uptrend_pullback|retest)&~d.overextended
     d['buy_score']=d.support_hits.clip(upper=4)*2+d.reversal_candle.astype(int)*2+d.pullback.astype(int)*2+d.breakout_retest.astype(int)*2+(d.volume_ratio>=1.3).astype(int)
     # Resistance proximity and bearish price reaction; no stochastic gating.
     resistance_levels=['BB_upper','resistance','prior_high60','weekly_prior_high','weekly_bb_upper','trend_upper_approx']
     d['resistance_hits']=sum(near(d[col],atr*.55).astype(int) for col in resistance_levels)
-    d['bearish_reaction']=((d.Close<d.Open)&((d.High-d.Close)/span>.5)) | ((d.Close<d.Close.shift(1))&(d.High>=d.High.shift(1)*.99))
-    d['sell_candidate']=(d.resistance_hits>=1)
-    d['sell_confirmed']=d.sell_candidate & (d.bearish_reaction | (d.resistance_hits>=2))
+    # Profit-taking needs genuine reversal, not resistance proximity alone.
+    upper_wick=(d.High-d[['Open','Close']].max(axis=1))/span
+    rejection=(upper_wick>.35)&(d.Close<d.Open)&(d.Close<d.High-span*.45)
+    failed_breakout=(d.High>=d.High.shift(1))&(d.Close<d.Close.shift(1))&(d.Close<d.Open)
+    d['bearish_reaction']=(rejection|failed_breakout).fillna(False)
+    d['sell_candidate']=d.resistance_hits>=1
+    d['sell_confirmed']=d.sell_candidate&d.bearish_reaction
     d['trend_break']=(d.Close<d.MA20)&(d.Close.shift(1)<d.MA20.shift(1))
     for col in ['buy_candidate','buy_confirmed','sell_candidate','sell_confirmed','trend_break']:
         d[col]=d[col].fillna(False).astype(bool)
@@ -105,7 +119,7 @@ def simulate(d,fee_bps=15,atr_multiple=2.5,max_hold=40):
     fee=fee_bps/10000
     cash=1.;units=0.;initial=0.;entry_i=None;entry_price=0.;peak=0.
     stage=0;pending=None;events=[];equity=[];last_exit=-999;last_sell=-999
-    cooldown=12
+    cooldown=15
     for i,(date,r) in enumerate(d.iterrows()):
         op=float(r.Open);cl=float(r.Close)
         if pending is not None and np.isfinite(op) and op>0:
@@ -136,11 +150,10 @@ def simulate(d,fee_bps=15,atr_multiple=2.5,max_hold=40):
             trailing=cl<peak-atr_multiple*atr and peak>entry_price+1.5*atr
             if hard_stop:pending=('exit','초기 손절',date)
             elif trailing:pending=('exit','ATR 추적 손절',date)
-            elif bool(r.trend_break) and (i-entry_i>=3):pending=('exit','추세 이탈',date)
-            elif i-entry_i>=max_hold:pending=('exit','최대 보유기간',date)
-            elif stage==0 and i-entry_i>=3 and cl>entry_price*1.025 and bool(r.sell_confirmed):
+            elif bool(r.trend_break) and (i-entry_i>=5) and cl<entry_price*.96:pending=('exit','추세 이탈·손실 제한',date)
+            elif stage==0 and i-entry_i>=7 and cl>entry_price*1.065 and bool(r.sell_confirmed) and peak>entry_price*1.08:
                 pending=('sell1','저항 확인·수익 구간',date)
-            elif stage==1 and i-last_sell>=3 and cl>entry_price*1.05 and bool(r.sell_confirmed):
+            elif stage==1 and i-last_sell>=5 and cl>entry_price*1.11 and bool(r.sell_confirmed) and peak>entry_price*1.13:
                 pending=('sell2','추가 저항 확인·수익 구간',date)
         elif i-last_exit>=cooldown and bool(r.buy_confirmed):
             pending=('buy','지지 구조·반등 확인',date)
