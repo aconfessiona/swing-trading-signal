@@ -6,7 +6,7 @@ import streamlit as st
 import yfinance as yf
 from engine import indicators, signals, backtest, summary
 
-st.set_page_config(page_title='스윙 매매 신호 3.0', page_icon='📈', layout='wide', initial_sidebar_state='collapsed')
+st.set_page_config(page_title='스윙 매매 신호 3.1', page_icon='📈', layout='wide', initial_sidebar_state='collapsed')
 st.markdown('''<style>
 .block-container {padding-top:1rem; padding-bottom:2rem; max-width:1350px}
 [data-testid="stMetricValue"] {font-size:clamp(1.1rem,3vw,1.7rem)}
@@ -14,7 +14,7 @@ st.markdown('''<style>
  h1{font-size:1.8rem!important} h2{font-size:1.35rem!important}
  [data-testid="stHorizontalBlock"]{gap:.35rem}}
 </style>''', unsafe_allow_html=True)
-st.title('📈 스윙 매매 신호 3.0')
+st.title('📈 스윙 매매 신호 3.1')
 st.caption('모바일 차트 개선 · A 상승추세 눌림목 / B 과매도 반등 · 기술적 청산 · 연구용 / 자동주문 없음')
 
 with st.expander('⚙️ 종목 및 백테스트 설정', expanded=True):
@@ -60,6 +60,7 @@ st.caption('종가 기준 신호입니다. 미확정 장중 일봉은 최종 신
 m1,m2=st.columns(2)
 m1.metric('20일 이동평균',f'{last["MA20"]:,.0f}')
 m2.metric('60일 이동평균',f'{last["MA60"]:,.0f}')
+st.caption(f'RSI(14): {last["RSI14"]:.1f} · 20일선 이격도: {last["MA20_gap_pct"]:+.1f}% · ATR(14): {last["ATR14"]:,.0f}')
 
 n={'1개월':23,'3개월':65,'6개월':130,'1년':260,'전체':len(valid)}[view]
 plot=valid.tail(n)
@@ -94,18 +95,19 @@ fig.update_layout(height=520,margin=dict(l=4,r=4,t=12,b=20),xaxis_rangeslider_vi
     legend=dict(orientation='h',y=-.14,x=0,font=dict(size=11)),
     hovermode='x unified',dragmode='pan',uirevision=f'{ticker}-{view}-price',
     font=dict(size=12),showlegend=True)
-st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':True,'scrollZoom':True,'responsive':True,'displaylogo':False})
+st.plotly_chart(fig,key='price_main',use_container_width=True,config={'displayModeBar':True,'scrollZoom':True,'responsive':True,'displaylogo':False})
+st.caption('X는 포지션과 무관한 기술적 청산 조건입니다. 백테스트 실제 청산일과 다를 수 있습니다.')
 st.caption('차트에서 두 손가락으로 확대하거나 손가락으로 좌우 이동할 수 있습니다. 오른쪽 위 도구의 집 아이콘으로 원래 범위로 돌아갑니다. 매도 X는 실제 체결이 아니라 조건 발생일입니다.')
 
 if show_vol and 'Volume' in plot:
     vfig=go.Figure(go.Bar(x=x,y=plot['Volume'],marker_color=['#d94848' if c>=o else '#2879cb' for o,c in zip(plot['Open'],plot['Close'])],name='거래량'))
     vfig.update_layout(height=180,margin=dict(l=4,r=4,t=5,b=20),xaxis=dict(type='category',nticks=6),yaxis=dict(side='right'),showlegend=False,dragmode='pan',uirevision=f'{ticker}-{view}-volume')
-    st.plotly_chart(vfig,use_container_width=True,config={'displayModeBar':False,'scrollZoom':True})
+    st.plotly_chart(vfig,key='volume_main',use_container_width=True,config={'displayModeBar':False,'scrollZoom':True})
 
 st.subheader('② 슬로우 스토캐스틱')
 st.caption('각각 독립된 차트로 확대 표시합니다. 빨강 %K / 초록 %D, 점선 20·80 기준')
 tab1,tab2,tab3=st.tabs(['단기 5·3·3','중기 10·6·6','장기 20·12·12'])
-def stochastic_chart(period):
+def stochastic_chart(period, location):
     chart=go.Figure()
     chart.add_trace(go.Scatter(x=x,y=plot[f'K{period}'],name='%K',mode='lines',line=dict(color='#df4646',width=2.4)))
     chart.add_trace(go.Scatter(x=x,y=plot[f'D{period}'],name='%D',mode='lines',line=dict(color='#16945c',width=2.4)))
@@ -114,16 +116,16 @@ def stochastic_chart(period):
         yaxis=dict(range=[0,100],side='right',tickvals=[0,20,50,80,100]),
         legend=dict(orientation='h',y=1.13,x=0),hovermode='x unified',dragmode='pan',
         uirevision=f'{ticker}-{view}-{period}')
-    st.plotly_chart(chart,use_container_width=True,config={'displayModeBar':True,'scrollZoom':True,'displaylogo':False})
+    st.plotly_chart(chart,key=f'stoch_{location}_{period}',use_container_width=True,config={'displayModeBar':True,'scrollZoom':True,'displaylogo':False})
     st.caption(f'최신 값 · %K {last[f"K{period}"]:.1f} / %D {last[f"D{period}"]:.1f}')
-with tab1: stochastic_chart(5)
-with tab2: stochastic_chart(10)
-with tab3: stochastic_chart(20)
+with tab1: stochastic_chart(5, "tab")
+with tab2: stochastic_chart(10, "tab")
+with tab3: stochastic_chart(20, "tab")
 
 with st.expander('📊 세 가지 스토캐스틱을 한 화면에서 보기'):
     for period in (5,10,20):
         st.markdown(f'**Slow ({period},{3 if period==5 else 6 if period==10 else 12},{3 if period==5 else 6 if period==10 else 12})**')
-        stochastic_chart(period)
+        stochastic_chart(period, "combined")
 
 st.subheader('③ 최근 신호 발생 기록')
 cols=['A','B','warning','exit']

@@ -22,6 +22,15 @@ def indicators(raw):
         fast = (100 * (close - low) / span).clip(0,100)
         d[f'K{n}'] = fast.rolling(smooth_k, min_periods=smooth_k).mean()
         d[f'D{n}'] = d[f'K{n}'].rolling(smooth_d, min_periods=smooth_d).mean()
+    prev = close.shift(1)
+    tr = pd.concat([(d['High']-d['Low']).abs(), (d['High']-prev).abs(), (d['Low']-prev).abs()], axis=1).max(axis=1)
+    d['ATR14'] = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    delta = close.diff()
+    avg_up = delta.clip(lower=0).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_down = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_up / avg_down.replace(0, np.nan)
+    d['RSI14'] = (100 - 100/(1+rs)).fillna(50)
+    d['MA20_gap_pct'] = (close / d['MA20'] - 1) * 100
     return d
 
 
@@ -34,23 +43,30 @@ def crossed_down(k, sig):
 
 
 def signals(d):
+    """Research signals; thresholds are provisional and require out-of-sample testing."""
     d = d.copy()
-    up5 = crossed_up(d.K5,d.D5)
-    dn5 = crossed_down(d.K5,d.D5)
-    dn10 = crossed_down(d.K10,d.D10)
-    up10 = crossed_up(d.K10,d.D10)
+    up5 = crossed_up(d.K5, d.D5)
+    dn5 = crossed_down(d.K5, d.D5)
+    dn10 = crossed_down(d.K10, d.D10)
+    up10 = crossed_up(d.K10, d.D10)
     trend = (d.Close > d.MA60) & (d.MA20 > d.MA60) & (d.MA20 >= d.MA20.shift(5))
-    pullback = (d.Low.rolling(5).min() <= d.MA20.rolling(5).max()*1.02) & (d.Close >= d.MA20*.985)
-    d['A'] = trend & pullback & up5 & (d.K10 >= d.D10) & (d.K20 >= d.D20)
+    # Require CURRENT proximity to MA20, not just a touch sometime during the past 5 bars.
+    near_ma20 = (d.Low <= d.MA20 * 1.025) & (d.Close >= d.MA20 * .985)
+    not_extended = (d.MA20_gap_pct <= 8) & (d.RSI14 < 70)
+    # Avoid treating a very stretched breakout as a pullback entry.
+    d['A'] = trend & near_ma20 & not_extended & up5 & (d.K10 >= d.D10) & (d.K20 >= d.D20)
     oversold = ((d.K5.rolling(5).min() < 20) | (d.Close.rolling(5).min() <= d.BB_lower.rolling(5).max()))
-    d['B'] = oversold & up5 & (d.Close > d.Close.shift(1)) & (up10 | (d.K10 > d.D10)) & (d.Close > d.BB_lower)
-    # Technical-only exits. Prioritize breakdown; secondary momentum loss needs confirmation.
-    d['exit_break'] = (d.Close < d.MA20) & (d.Close.shift(1) >= d.MA20.shift(1)) & (d.Close < d.MA10)
-    d['exit_momentum'] = dn5 & (d.K5 > 55) & (d.K10 < d.D10)
-    d['exit_trend'] = (d.Close < d.MA60) & (d.MA20 < d.MA20.shift(3)) & (d.Close.shift(1) >= d.MA60.shift(1))
-    d['exit'] = d[['exit_break','exit_momentum','exit_trend']].any(axis=1)
+    d['B'] = (oversold & up5 & (d.Close > d.Close.shift(1))
+              & (up10 | (d.K10 > d.D10)) & (d.Close > d.BB_lower)
+              & (d.RSI14 < 65) & (d.MA20_gap_pct < 8))
+    # Confirm MA20 weakness for 2 consecutive closes, with weak medium-term momentum.
+    below20 = (d.Close < d.MA20) & (d.Close.shift(1) < d.MA20.shift(1))
+    d['exit_break'] = below20 & (d.Close < d.MA10) & (d.K10 < d.D10)
+    d['exit_momentum'] = dn5 & (d.K5 > 55) & (d.K10 < d.D10) & (d.Close < d.MA20)
+    d['exit_trend'] = (d.Close < d.MA60) & (d.MA20 < d.MA20.shift(3))
+    d['exit'] = d[['exit_break', 'exit_momentum', 'exit_trend']].any(axis=1)
     d['warning'] = dn5 | dn10 | (d.Close < d.MA10)
-    for col in ['A','B','exit','warning']:
+    for col in ['A', 'B', 'exit', 'warning']:
         d[col] = d[col].fillna(False).astype(bool)
     return d
 
@@ -63,23 +79,27 @@ def backtest(d, strategy='A', fee_bps=15, max_hold=20):
     if strategy not in ('A','B'): raise ValueError('strategy must be A or B')
     d = d.dropna(subset=['MA60','K20','D20']).copy()
     if len(d)<3: return pd.DataFrame(), pd.Series(dtype=float)
-    capital=1.0; units=0.; entry_price=0.; entry_date=None; entry_idx=0
+    capital=1.0; units=0.; entry_price=0.; entry_date=None; entry_idx=0; peak_close=None
     trades=[]; curve=[]; pending=None
     for i, (date,row) in enumerate(d.iterrows()):
         op=float(row.Open); cl=float(row.Close)
         if pending == 'sell' and units:
             proceeds=units*op*(1-fee_bps/10000)
             trades.append({'entry_date':entry_date,'exit_date':date,'entry_price':entry_price,'exit_price':op,'return_pct':(proceeds/(units*entry_price/(1+fee_bps/10000))-1)*100,'holding_bars':i-entry_idx,'exit_reason':pending_reason})
-            capital=proceeds; units=0.; entry_date=None
+            capital=proceeds; units=0.; entry_date=None; peak_close=None
         elif pending == 'buy' and not units:
             entry_price=op; units=capital*(1-fee_bps/10000)/op
-            entry_date=date; entry_idx=i; capital=0.
+            entry_date=date; entry_idx=i; capital=0.; peak_close=cl
         pending=None
         equity=capital+units*cl
         curve.append((date,equity))
         if i==len(d)-1: continue
         if units:
-            if bool(row['exit']): pending='sell'; pending_reason='기술적 청산'
+            peak_close = max(peak_close, cl)
+            # Signal at today's close; execute at next open. ATR stop is NOT a guaranteed stop fill.
+            atr_exit = pd.notna(row.get('ATR14')) and cl < peak_close - 2.5 * float(row['ATR14'])
+            if atr_exit: pending='sell'; pending_reason='ATR 추적 청산'
+            elif bool(row['exit']): pending='sell'; pending_reason='기술적 청산'
             elif i-entry_idx+1 >= max_hold: pending='sell'; pending_reason='최대 보유기간'
         elif bool(row[strategy]): pending='buy'
     # Mark open position to last close, without inventing a completed trade.
