@@ -8,7 +8,7 @@ from engine import prepare,simulate
 
 st.set_page_config(page_title='스윙 4.7',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
 st.markdown('''<style>.block-container{padding:0.7rem 0.6rem 2rem;max-width:1200px}h1{font-size:1.65rem!important}h2,h3{font-size:1.2rem!important}div[data-testid="stPlotlyChart"]{overflow:hidden}@media(max-width:600px){.stRadio>div{gap:.3rem}}</style>''',unsafe_allow_html=True)
-st.title('📈 스윙 매매 4.7.0')
+st.title('📈 스윙 매매 4.7.1')
 st.caption('가격·지지저항 중심 | 거래량 가점 | 30/30/40 분할 매도 | 연구용')
 with st.expander('⚙️ 종목 및 백테스트 설정',expanded=True):
     ticker=st.text_input('종목코드',value='373220.KS').strip().upper()
@@ -40,8 +40,19 @@ try:
     ev,eq,opened=simulate(d,fee,atr,hold)
 except Exception as exc:
     st.error(f'데이터 처리 오류: {exc}');st.stop()
+# Version mismatch guard: an older engine.py can silently remain deployed.
+required={'regime','buy_blocked','buy_candidate','buy_confirmed','entry_type','risk_score'}
+missing=required-set(d.columns)
+if missing:
+    st.error('app.py와 engine.py 버전이 일치하지 않습니다. GitHub 루트에 4.7.1 네 파일을 모두 교체해 주세요. 누락된 지표: '+', '.join(sorted(missing)))
+    st.stop()
 last=d.iloc[-1]
-st.info(f'현재 국면 {last.regime} | 매수 제한 {"예" if last.buy_blocked else "아니오"} | 최근 일봉: {d.index[-1]:%Y-%m-%d} | 종가 {last.Close:,.0f} | 매수 후보 {"예" if last.buy_candidate else "아니오"} | 매수 확정 {"예" if last.buy_confirmed else "아니오"}')
+regime=str(last['regime'])
+blocked='예' if bool(last['buy_blocked']) else '아니오'
+candidate='예' if bool(last['buy_candidate']) else '아니오'
+confirmed='예' if bool(last['buy_confirmed']) else '아니오'
+last_close=float(last['Close'])
+st.info(f'현재 국면 {regime} | 매수 제한 {blocked} | 최근 일봉: {d.index[-1]:%Y-%m-%d} | 종가 {last_close:,.0f} | 매수 후보 {candidate} | 매수 확정 {confirmed}')
 st.caption('국면 판별 → 매수 금지 필터 → 국면별 매수. 상승 눌림목 / 박스 하단 / 돌파 후 재지지로 분리합니다. 당일 종가 기준이며 장중 미확정 데이터는 제외하세요.')
 with st.expander('🔍 최근 국면과 매수 차단 이유',expanded=False):
     cols=['Close','regime','risk_score','ma20_below_days','failed_high','failed_breakout','buy_blocked','entry_type','buy_confirmed']
