@@ -8,7 +8,7 @@ from engine import prepare,simulate
 
 st.set_page_config(page_title='스윙 4.4',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
 st.markdown('''<style>.block-container{padding:0.7rem 0.6rem 2rem;max-width:1200px}h1{font-size:1.65rem!important}h2,h3{font-size:1.2rem!important}div[data-testid="stPlotlyChart"]{overflow:hidden}@media(max-width:600px){.stRadio>div{gap:.3rem}}</style>''',unsafe_allow_html=True)
-st.title('📈 스윙 매매 4.4')
+st.title('📈 스윙 매매 4.4.1')
 st.caption('가격·지지저항 중심 | 거래량 가점 | 30/30/40 분할 매도 | 연구용')
 with st.expander('⚙️ 종목 및 백테스트 설정',expanded=True):
     ticker=st.text_input('종목코드',value='373220.KS').strip().upper()
@@ -63,7 +63,7 @@ if show=='모든 지표':
     line('weekly_bb_upper','주봉 BB 상단','#ad9244',1.3,'dot')
 def mark(dates,values,name,color,symbol,size=11,outline=False):
     if len(dates)==0:return
-    fig.add_trace(go.Scatter(x=pd.to_datetime(dates).strftime('%Y-%m-%d').tolist(),y=values,mode='markers',name=name,marker=dict(symbol=symbol,size=size,color='rgba(255,255,255,0.15)' if outline else color,line=dict(color=color,width=2 if outline else 1)),hovertemplate='%{x}<br>'+name+'<extra></extra>'))
+    fig.add_trace(go.Scatter(x=pd.DatetimeIndex(pd.to_datetime(dates)).strftime('%Y-%m-%d').tolist(),y=values,mode='markers',name=name,marker=dict(symbol=symbol,size=size,color='rgba(255,255,255,0.15)' if outline else color,line=dict(color=color,width=2 if outline else 1)),hovertemplate='%{x}<br>'+name+'<extra></extra>'))
 if markers:
     buy=p[p.buy_candidate];sell=p[p.sell_candidate]
     mark(buy.index,buy.Low*.98,'매수 관심','#13a074','circle-open',8,True)
