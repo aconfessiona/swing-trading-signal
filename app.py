@@ -129,15 +129,68 @@ def prepare(raw):
     retest=(d.Low<=breakout_level*1.025)&(d.Low>=breakout_level*.965)&(c>breakout_level)&confirmation
     recovered=(d.MA20>=d.MA20.shift(5))&(c>d.MA20)&(c>d.MA60*.985)
     reversal_buy=(d.regime.isin(['상승','횡보']))&breakout_recent&retest&recovered&(~failed_breakout)
-    d['entry_type']=np.select([up_buy,box_buy,reversal_buy],['상승 눌림목','박스 하단','돌파 후 재지지'],default='')
-    d['buy_candidate']=((d.regime=='상승')&pullback_test)|((d.regime=='횡보')&near_box&bb_test)|((d.regime.isin(['상승','횡보']))&breakout_recent)
+    # v4.7.3: Separate a WATCH zone from a confirmed, tradable reversal.
+    # Support zones use only prior bars or indicators computed at the current close.
+    # BB contact by itself is never sufficient for an executed buy.
+    prior_floor=d.Low.shift(1).rolling(100,min_periods=35).min()
+    prior_floor60=d.Low.shift(1).rolling(60,min_periods=25).min()
+    support_tolerance=pd.concat([atr*.75,c*.018],axis=1).max(axis=1)
+    bb_contact=(d.Low<=d.BB_lower+atr*.55)
+    prior_floor_contact=(d.Low<=prior_floor+support_tolerance)|(d.Low<=prior_floor60+support_tolerance)
+    pivot_contact=near(recent_low,support_tolerance)
+    trend_contact=near(d.trend_support,support_tolerance)&(d.trend_support>0)
+    fib_contact=pd.Series(False,index=d.index)
+    for f in [.236,.382,.5,.618]:
+        fib_contact=fib_contact|near(d[f'fib_{f}'],atr*.45)
+    # 'Confluence' means BB lower + a distinct support source, not many correlated fibs.
+    structural_support=prior_floor_contact|pivot_contact|trend_contact
+    support_confluence=bb_contact&structural_support
+    deep_drop=(c/c.shift(15)<.90)|(c/d.MA20<.94)
+    near_recent_bottom=d.Low<=d.Low.shift(1).rolling(15,min_periods=7).min()+atr*.65
+    # Early reversal WATCH: explicitly no simulated execution.
+    d['bottom_watch']=(bb_contact&deep_drop&near_recent_bottom).fillna(False)
+    # Higher-confidence watch when two distinct support concepts overlap.
+    d['bottom_priority']=(support_confluence&near_recent_bottom).fillna(False)
+    # Confirm after support holds: price recovers above prior close / previous high,
+    # with a confirmed reversal candle. Do not buy an unconfirmed falling knife.
+    prior_watch=d.bottom_priority.shift(1).rolling(5,min_periods=1).max().fillna(0).astype(bool)
+    recent_floor=d.Low.shift(1).rolling(5,min_periods=2).min()
+    hold_floor=d.Low>=recent_floor-atr*.65
+    bounce_confirm=(d.reversal_candle & (c>d.High.shift(1)) & (c>c.shift(2)))
+    # Falling-knife guard: avoid buys in a fresh breakdown or persistent steep decline.
+    fresh_break=(c<prior_floor*.975)|(d.Low<recent_floor-atr*1.1)
+    steep_decline=(d.MA20<d.MA20.shift(5)*.955)&(c<d.MA20*.93)
+    # Exceptional bottom entries need a prior watch, a recovery and no new breakdown.
+    bottom_buy=prior_watch&hold_floor&bounce_confirm&(~fresh_break)&(~steep_decline)
+    bottom_buy=bottom_buy&(c<=d.MA20*1.025)&(c<=d.BB_lower+atr*2.7)
+    # Downtrend entries require TWO support types and stronger evidence.
+    bottom_buy=bottom_buy&(~(d.regime=='하락')|support_confluence.rolling(5,min_periods=1).max().astype(bool))
+    # Uptrend / box / breakout entries stay independent.
+    d['entry_type']=np.select(
+        [bottom_buy,up_buy,box_buy,reversal_buy],
+        ['바닥 지지 확인','상승 눌림목','박스 하단','돌파 후 재지지'],default='')
+    d['buy_candidate']=(
+        d.bottom_watch|d.bottom_priority|
+        ((d.regime=='상승')&pullback_test)|
+        ((d.regime=='횡보')&near_box&bb_test)|
+        ((d.regime.isin(['상승','횡보']))&breakout_recent)
+    ).fillna(False)
     d['overextended']=(c>d.MA20*1.085)|(c/c.shift(5)>1.13)|(d.RSI14>75)
-    d['buy_confirmed']=(up_buy|box_buy|reversal_buy)&(~d.overextended)&(~d.buy_blocked)
-    d['support_hits']=(near(d.BB_lower,atr*.45).astype(int)+near(recent_low,atr*.6).astype(int)+near(d.trend_support,atr*.5).astype(int))
-    for f in [.236,.382,.5,.618]:d['support_hits']+=near(d[f'fib_{f}'],atr*.4).astype(int)
+    # A confirmed bottom exception overrides only the regime block, never price safeguards.
+    d['buy_confirmed']=(
+        (bottom_buy|(up_buy|box_buy|reversal_buy)&(~d.buy_blocked))&
+        (~d.overextended)&(~fresh_break)
+    ).fillna(False)
+    d['support_hits']=(
+        bb_contact.astype(int)+prior_floor_contact.astype(int)+
+        pivot_contact.astype(int)+trend_contact.astype(int)+fib_contact.astype(int)
+    )
     d['buy_score']=d.support_hits.clip(upper=4)*2+d.reversal_candle.astype(int)*2+(d.volume_ratio>=1.3).astype(int)
     d['pullback']=pullback_test
     d['breakout_retest']=reversal_buy
+    d['bottom_watch_reason']=np.select(
+        [d.bottom_priority,d.bottom_watch],
+        ['BB 하단 + 장기/전저점/추세선 지지 중첩','BB 하단 + 급락 후 저점 접근'],default='')
     # Resistance proximity and bearish price reaction; no stochastic gating.
     resistance_levels=['BB_upper','resistance','prior_high60','weekly_prior_high','weekly_bb_upper','trend_upper_approx']
     d['resistance_hits']=sum(near(d[col],atr*.55).astype(int) for col in resistance_levels)
@@ -151,6 +204,8 @@ def prepare(raw):
     d['trend_break']=(d.Close<d.MA20)&(d.Close.shift(1)<d.MA20.shift(1))
     for col in ['buy_candidate','buy_confirmed','sell_candidate','sell_confirmed','trend_break']:
         d[col]=d[col].fillna(False).astype(bool)
+    # Limit displayed confirmations to one per 7 bars; actual simulated trades
+    # already enforce a single position and exit cooldown.
     return d
 
 
@@ -199,11 +254,9 @@ def simulate(d,fee_bps=15,atr_multiple=2.5,max_hold=40):
         elif i-last_exit>=cooldown and bool(r.buy_confirmed):
             pending=('buy',str(r.entry_type),date)
     return pd.DataFrame(events,columns=['signal_date','date','action','reason','price','fraction']),pd.Series([v for _,v in equity],index=[t for t,_ in equity],name='equity',dtype=float),units>0
-
-
 st.set_page_config(page_title='스윙 4.7',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
 st.markdown('''<style>.block-container{padding:0.7rem 0.6rem 2rem;max-width:1200px}h1{font-size:1.65rem!important}h2,h3{font-size:1.2rem!important}div[data-testid="stPlotlyChart"]{overflow:hidden}@media(max-width:600px){.stRadio>div{gap:.3rem}}</style>''',unsafe_allow_html=True)
-st.title('📈 스윙 매매 4.7.2')
+st.title('📈 스윙 매매 4.7.3')
 st.caption('가격·지지저항 중심 | 거래량 가점 | 30/30/40 분할 매도 | 연구용')
 with st.expander('⚙️ 종목 및 백테스트 설정',expanded=True):
     ticker=st.text_input('종목코드',value='373220.KS').strip().upper()
@@ -253,7 +306,7 @@ with st.expander('🔍 최근 국면과 매수 차단 이유',expanded=False):
     cols=['Close','regime','risk_score','ma20_below_days','failed_high','failed_breakout','buy_blocked','entry_type','buy_confirmed']
     st.dataframe(d[cols].tail(25).iloc[::-1],use_container_width=True)
 show=st.radio('차트 표시',['핵심만','지지·저항 추가','모든 지표'],horizontal=True)
-markers=st.checkbox('후보 신호 표시 (분석용)',value=False)
+markers=st.checkbox('매수 관심·우선 후보 표시 (분석용)',value=True)
 all_trades=st.checkbox('모든 체결 마커 표시',value=False,help='기본은 선택한 체결만 차트에 표시합니다.')
 visible_ev=ev[ev.action!='잔여 청산'].copy() if not ev.empty else ev.copy()
 trade_ev=visible_ev[visible_ev.date.isin(d.tail({'3개월':65,'6개월':130,'1년':260,'전체':len(d)}[view]).index)].copy() if not visible_ev.empty else pd.DataFrame()
@@ -292,9 +345,15 @@ def mark(dates,values,name,color,symbol,size=11,outline=False,custom=None):
     fig.add_trace(go.Scatter(**kw))
 
 if markers:
-    buy=p[p.buy_candidate];sell=p[p.sell_candidate]
-    mark(buy.index,buy.Close,'매수 관심','#13a074','circle-open',8,True)
-    mark(sell.index,sell.Close,'매도 관심','#d99a2b','circle-open',8,True)
+    watch=p[p.bottom_watch & ~p.bottom_priority]
+    priority=p[p.bottom_priority]
+    # Place watch markers below the corresponding candle, without text labels.
+    mark(watch.index,watch.Low-p.ATR14.reindex(watch.index)*.55,
+         '바닥 매수 관심 (체결 아님)','#4d91c7','circle-open',9,True)
+    mark(priority.index,priority.Low-p.ATR14.reindex(priority.index)*.55,
+         '지지 중첩 우선 후보 (체결 아님)','#c18a18','diamond-open',10,True)
+    sell=p[p.sell_candidate]
+    mark(sell.index,sell.Close,'매도 관심','#d99a2b','circle-open',7,True)
 if markers:
     confirmed=p[p.buy_confirmed]
     mark(confirmed.index,confirmed.Close,'매수 확정 (종가)','#13995c','triangle-up-open',9,True)
@@ -327,7 +386,7 @@ if not trade_ev.empty:
 fig.update_layout(height=490,margin=dict(l=0,r=2,t=12,b=20),xaxis=dict(type='category',nticks=5,rangeslider_visible=False),yaxis=dict(side='right',tickformat=',.0f',automargin=True),legend=dict(orientation='h',y=-.16,font=dict(size=10)),hovermode='x unified',dragmode='pan',uirevision=f'{ticker}-{view}-{show}')
 st.subheader('① 일봉과 매매 신호')
 st.plotly_chart(fig,use_container_width=True,config={'displaylogo':False,'scrollZoom':True,'responsive':True},key='price470')
-st.caption('청산 표시는 숨겼지만 손절·위험 청산은 백테스트 수익률에 계속 반영됩니다. 기본은 깨끗한 가격 차트입니다. 위 ‘강조할 모의 체결’에서 거래를 선택하면 해당 체결 봉 하나만 강조합니다. ‘모든 체결 마커 표시’는 필요할 때만 켜세요. 신호일 종가 → 다음 거래일 시가 체결.')
+st.caption('파란 빈 원=바닥 관심, 금색 빈 마름모=지지 중첩 우선 후보(모두 체결 아님). 초록 삼각형=매수 확정 신호, 실제 모의 매수는 다음 거래일 시가. 청산 표시는 숨겼지만 손절·위험 청산은 백테스트 수익률에 계속 반영됩니다. 기본은 깨끗한 가격 차트입니다. 위 ‘강조할 모의 체결’에서 거래를 선택하면 해당 체결 봉 하나만 강조합니다. ‘모든 체결 마커 표시’는 필요할 때만 켜세요. 신호일 종가 → 다음 거래일 시가 체결.')
 st.subheader('② 스토캐스틱 (보조 참고만)')
 tabs=st.tabs(['5·3·3','10·6·6','20·12·12'])
 for tab,num in zip(tabs,[5,10,20]):
@@ -340,8 +399,8 @@ for tab,num in zip(tabs,[5,10,20]):
         st.plotly_chart(f,use_container_width=True,key=f'stoch44_{num}',config={'displaylogo':False,'scrollZoom':True})
 st.subheader('③ 최근 신호 / 모의 체결')
 recent=d.tail(45)
-recent_signals=recent[recent.buy_confirmed|recent.sell_confirmed][['Close','regime','entry_type','buy_confirmed','sell_confirmed','buy_score']].tail(12).copy()
-recent_signals.columns=['종가','국면','매수 유형','매수 확정','매도 확정','매수 점수']
+recent_signals=recent[recent.buy_confirmed|recent.sell_confirmed|recent.bottom_watch|recent.bottom_priority][['Close','regime','entry_type','bottom_watch_reason','buy_confirmed','sell_confirmed','buy_score']].tail(12).copy()
+recent_signals.columns=['종가','국면','매수 유형','바닥 관심 이유','매수 확정','매도 확정','매수 점수']
 st.dataframe(recent_signals.iloc[::-1],use_container_width=True)
 if visible_ev.empty:st.write('모의 체결 기록이 없습니다. 후보와 실제 체결은 다릅니다.')
 else:
