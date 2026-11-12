@@ -29,7 +29,10 @@ def indicators(raw):
     avg_up = delta.clip(lower=0).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     avg_down = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     rs = avg_up / avg_down.replace(0, np.nan)
-    d['RSI14'] = (100 - 100/(1+rs)).fillna(50)
+    rsi = 100 - 100/(1+rs)
+    rsi = rsi.mask((avg_down == 0) & (avg_up > 0), 100)
+    rsi = rsi.mask((avg_up == 0) & (avg_down > 0), 0)
+    d['RSI14'] = rsi.fillna(50)
     d['MA20_gap_pct'] = (close / d['MA20'] - 1) * 100
     return d
 

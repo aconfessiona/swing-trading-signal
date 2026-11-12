@@ -41,6 +41,9 @@ def load(symbol,years):
 try:
     if not ticker: st.warning('종목 코드를 입력하세요.'); st.stop()
     data=signals(indicators(load(ticker,years)))
+    required={'RSI14','ATR14','MA20_gap_pct','A','B','exit','warning'}
+    missing=required.difference(data.columns)
+    if missing: raise ValueError(f'지표 열 누락: {sorted(missing)}. engine.py를 같은 버전으로 교체해 주세요.')
     valid=data.dropna(subset=['MA60','K20','D20']).copy()
     if len(valid)<30: raise ValueError('지표 계산에 필요한 일봉이 부족합니다.')
 except Exception as exc:
