@@ -8,7 +8,7 @@ from engine import prepare,simulate
 
 st.set_page_config(page_title='스윙 4.4',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
 st.markdown('''<style>.block-container{padding:0.7rem 0.6rem 2rem;max-width:1200px}h1{font-size:1.65rem!important}h2,h3{font-size:1.2rem!important}div[data-testid="stPlotlyChart"]{overflow:hidden}@media(max-width:600px){.stRadio>div{gap:.3rem}}</style>''',unsafe_allow_html=True)
-st.title('📈 스윙 매매 4.4.2')
+st.title('📈 스윙 매매 4.4.3')
 st.caption('가격·지지저항 중심 | 거래량 가점 | 30/30/40 분할 매도 | 연구용')
 with st.expander('⚙️ 종목 및 백테스트 설정',expanded=True):
     ticker=st.text_input('종목코드',value='373220.KS').strip().upper()
@@ -45,7 +45,13 @@ st.info(f'최근 일봉: {d.index[-1]:%Y-%m-%d} | 종가 {last.Close:,.0f} | 매
 st.caption('당일 종가 확정 후 신호 평가. 실시간 장중 데이터는 확정 신호가 아닙니다.')
 show=st.radio('차트 표시',['핵심만','지지·저항 추가','모든 지표'],horizontal=True)
 markers=st.checkbox('후보 신호 표시',value=False)
-precise=st.checkbox('봉 위치 강조 + 체결 가격 라벨',value=True,help='매수·매도 마커를 해당 봉의 실제 시가에 찍고 봉을 세로선으로 강조합니다.')
+all_trades=st.checkbox('전체 모의 체결 표시',value=False,help='기본은 최근 8건만 표시해 차트가 겹치지 않도록 합니다.')
+trade_ev=ev[ev.date.isin(d.tail({'3개월':65,'6개월':130,'1년':260,'전체':len(d)}[view]).index)].copy() if not ev.empty else pd.DataFrame()
+if not all_trades and not trade_ev.empty: trade_ev=trade_ev.tail(8)
+options=['선택 안 함']
+if not trade_ev.empty:
+    options += [f"{pd.Timestamp(r.date):%Y-%m-%d} · {r.action} · {float(r.price):,.0f}원" for _,r in trade_ev.iloc[::-1].iterrows()]
+selected=st.selectbox('강조할 모의 체결 (선택한 봉만 표시)',options,index=0)
 n={'3개월':65,'6개월':130,'1년':260,'전체':len(d)}[view]
 p=d.tail(n);x=p.index.strftime('%Y-%m-%d').tolist()
 fig=go.Figure()
@@ -82,38 +88,36 @@ if markers:
 confirmed=p[p.buy_confirmed]
 mark(confirmed.index,confirmed.Close,'매수 확정 (종가)','#13995c','triangle-up-open',12,True)
 
-# 체결 마커는 봉에서 떨어진 임의 위치가 아닌 '해당 거래일 시가'에 정확히 배치.
-# 각 체결 봉의 얇은 수직 점선은 해당 봉을 찾기 위한 시각적 안내선.
-if not ev.empty:
+# 차트에는 가격 라벨을 상시 표시하지 않음: 봉과 마커가 가려지는 현상 방지.
+# 선택한 거래에만 세로선 및 화살표를 표시하고 상세 정보는 차트 밖에 출력.
+if not trade_ev.empty:
     event_specs=[
-        ('매수','#13995c','triangle-up','매수'),
-        ('1차 30% 매도','#dfaa25','circle','1차 30%'),
-        ('2차 30% 매도','#ed7e2b','diamond','2차 30%'),
-        ('잔여 청산','#d44949','x','잔여 청산'),
+        ('매수','#13995c','triangle-up'),
+        ('1차 30% 매도','#dfaa25','circle'),
+        ('2차 30% 매도','#ed7e2b','diamond'),
+        ('잔여 청산','#d44949','x'),
     ]
-    for action,color,symbol,short in event_specs:
-        e=ev[(ev.action==action)&(ev.date.isin(p.index))].copy()
+    for action,color,symbol in event_specs:
+        e=trade_ev[trade_ev.action==action]
         if e.empty:continue
-        prices=e.price.astype(float).tolist()
         details=['신호일: '+pd.Timestamp(t).strftime('%Y-%m-%d') for t in e.signal_date]
-        mark(e.date,prices,'모의 '+action,color,symbol,15,custom=details)
-        if precise:
-            for _,r in e.iterrows():
-                date=pd.Timestamp(r.date).strftime('%Y-%m-%d')
-                fig.add_shape(type='line',xref='x',yref='y',
-                    x0=date,x1=date,y0=float(p.loc[r.date,'Low']),y1=float(p.loc[r.date,'High']),
-                    line=dict(color=color,width=2,dash='dot'),layer='above')
-                fig.add_annotation(x=date,y=float(r.price),xref='x',yref='y',
-                    text=short+'<br>'+f'{float(r.price):,.0f}',
-                    showarrow=True,arrowhead=2,arrowsize=.7,arrowwidth=1.2,arrowcolor=color,
-                    ax=0,ay=36 if action=='매수' else -42,
-                    font=dict(size=10,color=color),
-                    bgcolor='rgba(255,255,255,.88)',bordercolor=color,borderwidth=.7,
-                    borderpad=2,opacity=.95)
-fig.update_layout(height=590 if precise else 510,margin=dict(l=0,r=2,t=45,b=25),xaxis=dict(type='category',nticks=5,rangeslider_visible=False),yaxis=dict(side='right',tickformat=',.0f',automargin=True),legend=dict(orientation='h',y=-.16,font=dict(size=10)),hovermode='x unified',dragmode='pan',uirevision=f'{ticker}-{view}-{show}')
+        mark(e.date,e.price.astype(float).tolist(),'모의 '+action,color,symbol,11,custom=details)
+    if selected!='선택 안 함':
+        selected_date=selected.split(' · ')[0]
+        selected_action=selected.split(' · ')[1]
+        hit=trade_ev[(trade_ev.date.dt.strftime('%Y-%m-%d')==selected_date)&(trade_ev.action==selected_action)]
+        if not hit.empty:
+            r=hit.iloc[0]
+            date=pd.Timestamp(r.date).strftime('%Y-%m-%d')
+            fig.add_vline(x=date,line_color='#606060',line_dash='dot',line_width=1.5)
+            fig.add_trace(go.Scatter(x=[date],y=[float(r.price)],mode='markers',
+                marker=dict(symbol='circle-open',size=23,color='#111111',line=dict(width=2)),
+                name='선택 거래',showlegend=False,hovertemplate='선택한 체결: %{y:,.0f}원<extra></extra>'))
+            st.info(f"선택 거래: {date} · {r.action} · 체결가 {float(r.price):,.0f}원 | 신호일 {pd.Timestamp(r.signal_date):%Y-%m-%d}")
+fig.update_layout(height=490,margin=dict(l=0,r=2,t=12,b=20),xaxis=dict(type='category',nticks=5,rangeslider_visible=False),yaxis=dict(side='right',tickformat=',.0f',automargin=True),legend=dict(orientation='h',y=-.16,font=dict(size=10)),hovermode='x unified',dragmode='pan',uirevision=f'{ticker}-{view}-{show}')
 st.subheader('① 일봉과 매매 신호')
-st.plotly_chart(fig,use_container_width=True,config={'displaylogo':False,'scrollZoom':True,'responsive':True},key='price442')
-st.caption('빈 마커=신호 당일 종가 / 채운 마커=다음 거래일 실제 모의 체결 시가. 세로 점선은 체결 봉, 숫자는 체결가입니다. 겹치면 차트를 확대하거나 ‘봉 위치 강조’를 끄세요.')
+st.plotly_chart(fig,use_container_width=True,config={'displaylogo':False,'scrollZoom':True,'responsive':True},key='price443')
+st.caption('차트에는 최근 모의 체결 8건만 표시합니다. 기호를 누르면 날짜·체결가를 확인할 수 있고, 위에서 거래를 선택하면 해당 봉만 강조됩니다. 채운 마커는 신호 다음 거래일 시가입니다.')
 st.subheader('② 스토캐스틱 (보조 참고만)')
 tabs=st.tabs(['5·3·3','10·6·6','20·12·12'])
 for tab,num in zip(tabs,[5,10,20]):
