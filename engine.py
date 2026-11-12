@@ -77,8 +77,15 @@ def prepare(raw):
     d['breakout_retest']=(d.Close>d.resistance.shift(1)*.985)&(d.Low<=d.resistance.shift(1)*1.025)&(d.Close>d.Open)
     # Prevent a chased entry near resistance or after a fast spike.
     d['overextended']=(d.Close>d.MA20*1.085)|(c/c.shift(5)>1.13)|(d.RSI14>73)
+    # Price structure first: a single BB touch in a strong downtrend is NOT a buy.
+    # Avoid buying into falling knives; require a reclaim/confirmed reversal or trend pullback.
+    recovering=(c>d.MA20)&(d.MA20>=d.MA20.shift(3))&(c>c.shift(3))
+    higher_low=(d.Low.rolling(5).min()>d.Low.shift(5).rolling(15).min())&(c>c.shift(3))
+    base_reversal=(d.support_hits>=2)&(d.reversal_candle)&(recovering|higher_low)
+    uptrend_pullback=d.uptrend&d.pullback&d.reversal_candle&(c>=d.MA20*.985)
+    retest=d.breakout_retest&d.reversal_candle&(c>d.MA20)&(d.MA20>=d.MA20.shift(5))
     d['buy_candidate']=((d.support_hits>=1)|d.pullback|d.breakout_retest)&~d.overextended
-    d['buy_confirmed']=d.buy_candidate & d.reversal_candle & ((d.support_hits>=1)|(d.pullback)|(d.breakout_retest))
+    d['buy_confirmed']=(base_reversal|uptrend_pullback|retest)&~d.overextended
     d['buy_score']=d.support_hits.clip(upper=4)*2+d.reversal_candle.astype(int)*2+d.pullback.astype(int)*2+d.breakout_retest.astype(int)*2+(d.volume_ratio>=1.3).astype(int)
     # Resistance proximity and bearish price reaction; no stochastic gating.
     resistance_levels=['BB_upper','resistance','prior_high60','weekly_prior_high','weekly_bb_upper','trend_upper_approx']
@@ -93,15 +100,19 @@ def prepare(raw):
 
 
 def simulate(d,fee_bps=15,atr_multiple=2.5,max_hold=40):
-    """30/30/40 exits. Signals at close; fills at next open. No orders placed."""
-    d=d.dropna(subset=['MA60','ATR14']).copy();fee=fee_bps/10000
-    cash=1.;units=0.;initial=0.;entry_i=None;peak=0.;stage=0;pending=None;events=[];equity=[]
+    """Long-only, one position at a time, 30/30/40. Next-open fills; no lookahead."""
+    d=d.dropna(subset=['MA60','ATR14']).copy()
+    fee=fee_bps/10000
+    cash=1.;units=0.;initial=0.;entry_i=None;entry_price=0.;peak=0.
+    stage=0;pending=None;events=[];equity=[];last_exit=-999;last_sell=-999
+    cooldown=12
     for i,(date,r) in enumerate(d.iterrows()):
         op=float(r.Open);cl=float(r.Close)
         if pending is not None and np.isfinite(op) and op>0:
             action,reason,signal_date=pending
             if action=='buy' and units==0:
-                units=cash*(1-fee)/op;initial=units;cash=0.;entry_i=i;peak=cl;stage=0
+                units=cash*(1-fee)/op;initial=units;cash=0.
+                entry_i=i;entry_price=op;peak=op;stage=0
                 events.append(dict(signal_date=signal_date,date=date,action='매수',reason=reason,price=op,fraction=1.))
             elif action in ('sell1','sell2','exit') and units>0:
                 fraction={'sell1':.3,'sell2':.3,'exit':1.}[action]
@@ -109,20 +120,28 @@ def simulate(d,fee_bps=15,atr_multiple=2.5,max_hold=40):
                 cash+=sold*op*(1-fee);units-=sold
                 name={'sell1':'1차 30% 매도','sell2':'2차 30% 매도','exit':'잔여 청산'}[action]
                 events.append(dict(signal_date=signal_date,date=date,action=name,reason=reason,price=op,fraction=sold/initial))
+                last_sell=i
                 if action=='sell1':stage=1
                 elif action=='sell2':stage=2
-                else:units=0.;stage=0;entry_i=None
+                else:
+                    units=0.;stage=0;entry_i=None;last_exit=i
             pending=None
         equity.append((date,cash+units*cl))
         if i==len(d)-1:continue
         if units>0:
             peak=max(peak,cl)
-            stop=cl<peak-atr_multiple*float(r.ATR14)
-            # Hard risk exits may occur before 30/30 targets; residual position is closed.
-            if stop:pending=('exit','ATR 보호 청산',date)
-            elif bool(r.trend_break):pending=('exit','20일선 2일 이탈',date)
+            atr=float(r.ATR14)
+            # Risk management takes precedence. No claim that these are peak sells.
+            hard_stop=cl<entry_price-2.0*atr
+            trailing=cl<peak-atr_multiple*atr and peak>entry_price+1.5*atr
+            if hard_stop:pending=('exit','초기 손절',date)
+            elif trailing:pending=('exit','ATR 추적 손절',date)
+            elif bool(r.trend_break) and (i-entry_i>=3):pending=('exit','추세 이탈',date)
             elif i-entry_i>=max_hold:pending=('exit','최대 보유기간',date)
-            elif stage==0 and bool(r.sell_confirmed):pending=('sell1','저항 + 가격 반응',date)
-            elif stage==1 and bool(r.sell_confirmed) and i-entry_i>=3:pending=('sell2','추가 저항 + 가격 반응',date)
-        elif bool(r.buy_confirmed):pending=('buy','지지 + 반등 캔들',date)
-    return pd.DataFrame(events),pd.Series([v for _,v in equity],index=[t for t,_ in equity],name='equity',dtype=float),units>0
+            elif stage==0 and i-entry_i>=3 and cl>entry_price*1.025 and bool(r.sell_confirmed):
+                pending=('sell1','저항 확인·수익 구간',date)
+            elif stage==1 and i-last_sell>=3 and cl>entry_price*1.05 and bool(r.sell_confirmed):
+                pending=('sell2','추가 저항 확인·수익 구간',date)
+        elif i-last_exit>=cooldown and bool(r.buy_confirmed):
+            pending=('buy','지지 구조·반등 확인',date)
+    return pd.DataFrame(events,columns=['signal_date','date','action','reason','price','fraction']),pd.Series([v for _,v in equity],index=[t for t,_ in equity],name='equity',dtype=float),units>0
