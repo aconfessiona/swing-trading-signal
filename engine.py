@@ -1,138 +1,93 @@
-"""Daily-bar swing signal engine. Signals at close; execution next open."""
+"""Daily swing strategy research engine. No brokerage connection."""
 import numpy as np
 import pandas as pd
 
 
-def prepare(raw):
-    df = raw.copy()
-    df.columns = [str(x).strip().lower() for x in df.columns]
-    if 'date' in df.columns:
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.set_index('date')
-    needed = ['open','high','low','close','volume']
-    missing = [x for x in needed if x not in df]
-    if missing:
-        raise ValueError(f"필수 컬럼 누락: {missing}. Date,Open,High,Low,Close,Volume 필요")
-    df = df[needed].copy().sort_index()
-    df = df.loc[~df.index.duplicated(keep='last')]
-    for c in needed:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
-    df = df.dropna(subset=needed)
-    df = df[(df['close']>0)&(df['open']>0)&(df['high']>=df['low'])]
-    if len(df)<120:
-        raise ValueError('최소 120거래일 이상의 일봉 데이터가 필요합니다.')
-    return df
-
-
-def stoch(df, n, smooth_k, smooth_d):
-    lo = df.low.rolling(n,min_periods=n).min()
-    hi = df.high.rolling(n,min_periods=n).max()
-    raw = 100*(df.close-lo)/(hi-lo).replace(0,np.nan)
-    k = raw.rolling(smooth_k,min_periods=smooth_k).mean()
-    d = k.rolling(smooth_d,min_periods=smooth_d).mean()
-    return k,d
-
-
-def indicators(df):
-    d = prepare(df)
-    for n in [5,10,20,60]:
-        d[f'ma{n}'] = d.close.rolling(n,min_periods=n).mean()
-    for n in [10,20]:
-        sd = d.close.rolling(n,min_periods=n).std(ddof=0)
-        d[f'bb{n}_upper'] = d[f'ma{n}']+2*sd
-        d[f'bb{n}_lower'] = d[f'ma{n}']-2*sd
-    for n,k,dn in [(5,3,3),(10,6,6),(20,12,12)]:
-        d[f'k{n}'],d[f'd{n}'] = stoch(d,n,k,dn)
-    pc = d.close.shift(1)
-    tr = pd.concat([(d.high-d.low),(d.high-pc).abs(),(d.low-pc).abs()],axis=1).max(axis=1)
-    d['atr'] = tr.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
-    d['vol_ratio'] = d.volume/d.volume.rolling(20,min_periods=20).mean().replace(0,np.nan)
-    cross = (d.k5>d.d5)&(d.k5.shift(1)<=d.d5.shift(1))
-    pull = ((d.low<=d.ma10*1.01)|(d.low<=d.bb10_lower*1.02)).rolling(5,min_periods=5).max().fillna(0).astype(bool)
-    a = (d.ma20>d.ma60)&(d.ma20>d.ma20.shift(5))&pull&cross&(d.k10>d.k10.shift(1))&(d.close>d.ma5)
-    dipped = (d.close<d.bb10_lower).rolling(3,min_periods=3).max().shift(1).fillna(0).astype(bool)
-    b = dipped&(d.close>d.bb10_lower)&cross&(d.k5<=30)&(d.k10>d.k10.shift(1))&(d.close>d.close.shift(1))
-    d['signal'] = np.select([a,b],['A','B'],default='')
-    # Ignore warm-up; all signals refer to completed daily candles.
-    d.iloc[:80,d.columns.get_loc('signal')] = ''
+def indicators(raw):
+    d = raw.copy().sort_index()
+    for c in ['Open', 'High', 'Low', 'Close']:
+        d[c] = pd.to_numeric(d[c], errors='coerce')
+    d = d.dropna(subset=['Open','High','Low','Close'])
+    close = d['Close']
+    for n in (5, 10, 20, 60):
+        d[f'MA{n}'] = close.rolling(n, min_periods=n).mean()
+    std = close.rolling(20, min_periods=20).std(ddof=0)
+    d['BB_mid'] = d['MA20']
+    d['BB_upper'] = d['MA20'] + 2 * std
+    d['BB_lower'] = d['MA20'] - 2 * std
+    for n, smooth_k, smooth_d in [(5,3,3),(10,6,6),(20,12,12)]:
+        low = d['Low'].rolling(n, min_periods=n).min()
+        high = d['High'].rolling(n, min_periods=n).max()
+        span = (high - low).replace(0, np.nan)
+        fast = (100 * (close - low) / span).clip(0,100)
+        d[f'K{n}'] = fast.rolling(smooth_k, min_periods=smooth_k).mean()
+        d[f'D{n}'] = d[f'K{n}'].rolling(smooth_d, min_periods=smooth_d).mean()
     return d
 
 
-def backtest(d, initial=10_000_000, risk_pct=1.0, fee_bps=15, max_position_pct=30):
-    """One position at a time. Signals close t, buy open t+1; stop/target intraday.
-    On ambiguous same-day stop/target, stop takes priority. Gap stops fill at open.
-    Exit at next open after close-based exit signal. No margin/shorting.
+def crossed_up(k, sig):
+    return (k > sig) & (k.shift(1) <= sig.shift(1))
+
+
+def crossed_down(k, sig):
+    return (k < sig) & (k.shift(1) >= sig.shift(1))
+
+
+def signals(d):
+    d = d.copy()
+    up5 = crossed_up(d.K5,d.D5)
+    dn5 = crossed_down(d.K5,d.D5)
+    dn10 = crossed_down(d.K10,d.D10)
+    up10 = crossed_up(d.K10,d.D10)
+    trend = (d.Close > d.MA60) & (d.MA20 > d.MA60) & (d.MA20 >= d.MA20.shift(5))
+    pullback = (d.Low.rolling(5).min() <= d.MA20.rolling(5).max()*1.02) & (d.Close >= d.MA20*.985)
+    d['A'] = trend & pullback & up5 & (d.K10 >= d.D10) & (d.K20 >= d.D20)
+    oversold = ((d.K5.rolling(5).min() < 20) | (d.Close.rolling(5).min() <= d.BB_lower.rolling(5).max()))
+    d['B'] = oversold & up5 & (d.Close > d.Close.shift(1)) & (up10 | (d.K10 > d.D10)) & (d.Close > d.BB_lower)
+    # Technical-only exits. Prioritize breakdown; secondary momentum loss needs confirmation.
+    d['exit_break'] = (d.Close < d.MA20) & (d.Close.shift(1) >= d.MA20.shift(1)) & (d.Close < d.MA10)
+    d['exit_momentum'] = dn5 & (d.K5 > 55) & (d.K10 < d.D10)
+    d['exit_trend'] = (d.Close < d.MA60) & (d.MA20 < d.MA20.shift(3)) & (d.Close.shift(1) >= d.MA60.shift(1))
+    d['exit'] = d[['exit_break','exit_momentum','exit_trend']].any(axis=1)
+    d['warning'] = dn5 | dn10 | (d.Close < d.MA10)
+    for col in ['A','B','exit','warning']:
+        d[col] = d[col].fillna(False).astype(bool)
+    return d
+
+
+def backtest(d, strategy='A', fee_bps=15, max_hold=20):
+    """Signal on close of t, execute at next available open t+1; no same-day lookahead.
+    Long-only, one position, full capital, roundtrip costs as fee_bps per side.
+    Equity marked at closes; forced time exit next open after max_hold bars.
     """
-    cash=float(initial)
-    qty=0; entry=stop=target=0.; strategy=''; entry_date=None; held=0
-    trades=[]; equity=[]; pending=None; fee=fee_bps/10000
-    for i,(dt,r) in enumerate(d.iterrows()):
-        op,hi,lo,cl = (float(r[x]) for x in ['open','high','low','close'])
-        if pending is not None:
-            action=pending;pending=None
-            if action['type']=='exit' and qty:
-                gross=qty*op; cash+=gross*(1-fee)
-                trades.append(dict(strategy=strategy,entry_date=entry_date,exit_date=dt,entry=entry,exit=op,qty=qty,return_pct=(op*(1-fee)/(entry*(1+fee))-1)*100,reason=action['reason']))
-                qty=0
-            elif action['type']=='buy' and not qty:
-                atr=action['atr']; refstop=action['stop']; strat=action['strategy']
-                if np.isfinite(atr) and atr>0 and np.isfinite(refstop):
-                    # Avoid buying when a large overnight gap invalidates risk plan.
-                    if op<=action['close']+atr and op>refstop:
-                        stop=refstop
-                        unitrisk=op-stop
-                        riskbudget=cash*risk_pct/100
-                        capbudget=cash*max_position_pct/100
-                        n=int(min(riskbudget/unitrisk,capbudget/(op*(1+fee))))
-                        if n>=1:
-                            qty=n; entry=op; strategy=strat; entry_date=dt; held=0
-                            cash-=qty*op*(1+fee)
-                            target=entry+2*unitrisk if strat=='A' else max(entry+unitrisk,action['ma10'])
-        if qty:
-            held+=1
-            # Gap through stop/target is filled at opening price, not trigger price.
-            if op<=stop:
-                px=op;reason='손절 갭'
-            elif op>=target:
-                px=op;reason='목표가 갭'
-            elif lo<=stop:
-                px=stop;reason='손절'
-            elif hi>=target:
-                px=target;reason='목표가'
-            else:
-                px=None;reason=''
-            if px is not None:
-                cash+=qty*px*(1-fee)
-                trades.append(dict(strategy=strategy,entry_date=entry_date,exit_date=dt,entry=entry,exit=px,qty=qty,return_pct=(px*(1-fee)/(entry*(1+fee))-1)*100,reason=reason))
-                qty=0
-            elif pending is None:
-                if strategy=='A' and (cl<r.ma10 or held>=20):
-                    pending={'type':'exit','reason':'10일선 이탈/기간 청산'}
-                elif strategy=='B' and (held>=10 or (r.k5<r.d5 and d.k5.iloc[i-1]>=d.d5.iloc[i-1])):
-                    pending={'type':'exit','reason':'모멘텀/기간 청산'}
-        if not qty and pending is None and i<len(d)-1 and r.signal in ('A','B'):
-            atr=float(r.atr)
-            if np.isfinite(atr) and atr>0:
-                if r.signal=='A':
-                    recent=float(d.low.iloc[max(0,i-9):i+1].min())
-                    # Closer stop of two candidates, must be below signal close.
-                    refstop=max(recent-0.1*atr,cl-2*atr)
-                else:
-                    recent=float(d.low.iloc[max(0,i-4):i+1].min())
-                    refstop=max(recent-0.1*atr,cl-1.5*atr)
-                if refstop<cl:
-                    pending={'type':'buy','strategy':r.signal,'atr':atr,'stop':refstop,'close':cl,'ma10':float(r.ma10)}
-        equity.append({'date':dt,'equity':cash+qty*cl})
-    eq=pd.DataFrame(equity).set_index('date')
-    t=pd.DataFrame(trades)
-    if len(t):
-        t['entry_date']=pd.to_datetime(t.entry_date)
-        t['exit_date']=pd.to_datetime(t.exit_date)
-    return t,eq
+    if strategy not in ('A','B'): raise ValueError('strategy must be A or B')
+    d = d.dropna(subset=['MA60','K20','D20']).copy()
+    if len(d)<3: return pd.DataFrame(), pd.Series(dtype=float)
+    capital=1.0; units=0.; entry_price=0.; entry_date=None; entry_idx=0
+    trades=[]; curve=[]; pending=None
+    for i, (date,row) in enumerate(d.iterrows()):
+        op=float(row.Open); cl=float(row.Close)
+        if pending == 'sell' and units:
+            proceeds=units*op*(1-fee_bps/10000)
+            trades.append({'entry_date':entry_date,'exit_date':date,'entry_price':entry_price,'exit_price':op,'return_pct':(proceeds/(units*entry_price/(1+fee_bps/10000))-1)*100,'holding_bars':i-entry_idx,'exit_reason':pending_reason})
+            capital=proceeds; units=0.; entry_date=None
+        elif pending == 'buy' and not units:
+            entry_price=op; units=capital*(1-fee_bps/10000)/op
+            entry_date=date; entry_idx=i; capital=0.
+        pending=None
+        equity=capital+units*cl
+        curve.append((date,equity))
+        if i==len(d)-1: continue
+        if units:
+            if bool(row['exit']): pending='sell'; pending_reason='기술적 청산'
+            elif i-entry_idx+1 >= max_hold: pending='sell'; pending_reason='최대 보유기간'
+        elif bool(row[strategy]): pending='buy'
+    # Mark open position to last close, without inventing a completed trade.
+    return pd.DataFrame(trades), pd.Series(dict(curve),name='equity',dtype=float)
 
 
-def stats(trades,eq,initial):
-    end=float(eq.equity.iloc[-1]); dd=eq.equity/eq.equity.cummax()-1
-    return {'수익률(%)':(end/initial-1)*100,'최대낙폭(%)':dd.min()*100,
-            '완료 거래 수':len(trades),'승률(%)':float((trades.return_pct>0).mean()*100) if len(trades) else 0,
-            '최종 평가액(원)':end}
+def summary(trades,equity):
+    if equity.empty: return {'total':0.,'mdd':0.,'count':0,'win':0.,'open_position':False}
+    dd=equity/equity.cummax()-1
+    return {'total':(equity.iloc[-1]-1)*100,'mdd':dd.min()*100,'count':len(trades),
+            'win':(trades.return_pct.gt(0).mean()*100 if len(trades) else 0.)}

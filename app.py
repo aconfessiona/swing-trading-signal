@@ -1,78 +1,91 @@
-import streamlit as st
+import datetime as dt
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from engine import indicators,backtest,stats
+import streamlit as st
+import yfinance as yf
+from engine import indicators, signals, backtest, summary
 
-st.set_page_config(page_title='스윙 매매 신호 1.0',layout='wide')
-st.title('📈 스윙 매매 신호 1.0')
-st.caption('A: 상승 추세 눌림목 | B: 과매도 반등 · 일봉 종가 신호, 다음 거래일 시가 진입 · 교육/연구용')
+st.set_page_config(page_title='스윙 매매 신호 2.0',page_icon='📈',layout='wide')
+st.title('📈 스윙 매매 신호 2.0')
+st.caption('1~4주 스윙 · A 상승추세 눌림목 / B 과매도 반등 · 기술적 매도 · 연구용 (자동주문 없음)')
 with st.sidebar:
-    st.header('데이터')
-    mode=st.radio('불러오기 방식',['종목코드 (Yahoo Finance)','CSV 업로드'])
-    if mode.startswith('종목'):
-        ticker=st.text_input('종목코드','006400.KS',help='삼성SDI: 006400.KS / 코스닥: .KQ / 미국: AAPL')
-        years=st.slider('조회 기간 (년)',1,10,5)
-    else:
-        file=st.file_uploader('일봉 CSV',type='csv')
-        st.caption('Date,Open,High,Low,Close,Volume 형식. 수정주가 일관성에 유의하세요.')
-    st.header('백테스트')
-    initial=st.number_input('초기 자산 (원)',min_value=100000,value=10000000,step=1000000)
-    risk=st.slider('거래당 위험 한도 (%)',0.25,2.0,1.0,0.25)
-    pos=st.slider('최대 종목 비중 (%)',5,100,30,5)
-    fee=st.number_input('매수·매도 각각 비용 (bp)',min_value=0,max_value=300,value=15,help='15bp=0.15%. 수수료·세금·슬리피지를 각 체결마다 일괄 근사')
+    st.header('분석 설정')
+    symbol=st.text_input('종목 코드 (예: 삼성SDI 006400.KS)',value='006400.KS').strip().upper()
+    years=st.selectbox('데이터 조회 기간', [2,3,5],index=1)
+    view=st.selectbox('차트 표시 기간',['3개월','6개월','1년','전체'],index=1)
+    fee=st.number_input('매수/매도 각 거래비용 (bp)',min_value=0,max_value=200,value=15,step=5)
+    hold=st.slider('최대 보유 거래일',min_value=5,max_value=40,value=20)
+    st.caption('15bp = 편도 0.15%. 세금·수수료·슬리피지를 합산한 가정값으로 조정하세요.')
+
+@st.cache_data(ttl=1800,show_spinner=False)
+def load(ticker, years):
+    end=dt.datetime.now(dt.timezone.utc).date()+dt.timedelta(days=1)
+    start=end-dt.timedelta(days=366*years)
+    df=yf.download(ticker,start=str(start),end=str(end),auto_adjust=True,progress=False,threads=False)
+    if isinstance(df.columns,pd.MultiIndex):
+        df.columns=df.columns.get_level_values(0)
+    if df.empty: raise ValueError('가격 데이터를 찾지 못했습니다. 종목 코드를 확인하세요.')
+    df.index=pd.to_datetime(df.index).tz_localize(None) if df.index.tz is not None else pd.to_datetime(df.index)
+    return df
+
 try:
-    if mode.startswith('종목'):
-        import yfinance as yf
-        raw=yf.download(ticker,period=f'{years}y',interval='1d',auto_adjust=True,progress=False,multi_level_index=False)
-        if raw.empty:
-            st.error('가격 데이터를 가져오지 못했습니다. 종목코드를 확인하거나 CSV를 업로드하세요.')
-            st.stop()
-        raw=raw.rename_axis('Date').reset_index()
-    else:
-        if file is None:
-            st.info('CSV를 업로드하면 분석을 시작합니다.')
-            st.stop()
-        raw=pd.read_csv(file)
-    d=indicators(raw)
-except Exception as ex:
-    st.error(f'데이터 처리 오류: {ex}')
+    raw=load(symbol,years)
+    data=signals(indicators(raw))
+    valid=data.dropna(subset=['MA60','K20','D20'])
+    if len(valid)<30: st.error('분석 가능한 일봉 데이터가 부족합니다.'); st.stop()
+except Exception as e:
+    st.error(f'데이터 조회/분석 실패: {e}')
+    st.info('Yahoo Finance 데이터는 지연되거나 일시적으로 차단될 수 있습니다. 잠시 후 다시 시도하세요.')
     st.stop()
 
-trades,eq=backtest(d,initial,risk,fee,pos)
-metrics=stats(trades,eq,initial)
-a,b,c,e=st.columns(4)
-a.metric('백테스트 수익률',f"{metrics['수익률(%)']:.2f}%")
-b.metric('최대낙폭',f"{metrics['최대낙폭(%)']:.2f}%")
-c.metric('완료 거래',f"{metrics['완료 거래 수']}회")
-e.metric('승률',f"{metrics['승률(%)']:.1f}%")
-last=d.iloc[-1]
-st.subheader('최근 일봉 신호')
-st.write(f"기준일: **{d.index[-1].date()}** · 종가: **{last.close:,.2f}** · 신호: **{last.signal or '관망'}**")
-st.caption('신호는 종가 확정 후에만 유효합니다. 종가가 아직 확정되지 않은 장중 데이터는 최종 신호가 아닙니다.')
+last=valid.iloc[-1]
+last_day=valid.index[-1].date()
+st.info(f'최신 수신 일봉: {last_day} · 종가 {last.Close:,.0f} · 거래소의 종가 확정 여부는 별도 확인 필요')
+if bool(last.A): label='A 매수 후보 (다음 거래일 확인)'
+elif bool(last.B): label='B 매수 후보 (다음 거래일 확인)'
+elif bool(last['exit']): label='기술적 청산 조건 (보유자만)'
+elif bool(last.warning): label='주의 / 관망'
+else: label='관망'
+st.subheader(f'최신 기술적 판단: {label}')
+st.caption('신호는 당일 종가로 계산됩니다. 실제 주문은 다음 거래일 시가 기준으로만 백테스트합니다. 장중 데이터는 최종 신호가 아닙니다.')
 
-fig=make_subplots(rows=2,cols=1,shared_xaxes=True,vertical_spacing=0.04,row_heights=[0.75,0.25],subplot_titles=('일봉 + 볼린저밴드 + 이동평균선','스토캐스틱'))
-fig.add_trace(go.Candlestick(x=d.index,open=d.open,high=d.high,low=d.low,close=d.close,name='가격'),row=1,col=1)
-for key,color in [('ma5','#16a34a'),('ma10','#ef4444'),('ma20','#9333ea'),('ma60','#f59e0b'),('bb10_upper','#1e3a8a'),('bb10_lower','#94a3b8')]:
-    fig.add_trace(go.Scatter(x=d.index,y=d[key],mode='lines',name=key,line=dict(color=color,width=1)),row=1,col=1)
-for s,color,sym in [('A','#16a34a','triangle-up'),('B','#2563eb','triangle-up')]:
-    v=d[d.signal==s]
-    fig.add_trace(go.Scatter(x=v.index,y=v.low*0.985,mode='markers',name=f'{s} 신호',marker=dict(symbol=sym,size=12,color=color)),row=1,col=1)
-if len(trades):
-    fig.add_trace(go.Scatter(x=trades.exit_date,y=trades.exit,mode='markers',name='청산 체결',marker=dict(symbol='x',size=10,color='#dc2626')),row=1,col=1)
-for n,color in [(5,'#ef4444'),(10,'#2563eb'),(20,'#9333ea')]:
-    fig.add_trace(go.Scatter(x=d.index,y=d[f'k{n}'],name=f'%K {n}',line=dict(color=color,width=1)),row=2,col=1)
-fig.add_hline(y=80,line_dash='dot',row=2,col=1)
-fig.add_hline(y=20,line_dash='dot',row=2,col=1)
-fig.update_layout(height=750,xaxis_rangeslider_visible=False,legend=dict(orientation='h'),margin=dict(l=10,r=10,t=40,b=10))
+c1,c2,c3,c4=st.columns(4)
+c1.metric('20일 이동평균',f'{last.MA20:,.0f}')
+c2.metric('60일 이동평균',f'{last.MA60:,.0f}')
+c3.metric('스토캐스틱 5 K/D',f'{last.K5:.1f} / {last.D5:.1f}')
+c4.metric('스토캐스틱 20 K/D',f'{last.K20:.1f} / {last.D20:.1f}')
+
+if view=='3개월': plot=valid.tail(65)
+elif view=='6개월': plot=valid.tail(130)
+elif view=='1년': plot=valid.tail(260)
+else: plot=valid
+fig=make_subplots(rows=4,cols=1,shared_xaxes=True,vertical_spacing=.035,row_heights=[.52,.16,.16,.16],subplot_titles=('가격 · 볼린저밴드 · 이동평균선 · 신호','Slow (5,3,3)','Slow (10,6,6)','Slow (20,12,12)'))
+fig.add_trace(go.Candlestick(x=plot.index,open=plot.Open,high=plot.High,low=plot.Low,close=plot.Close,name='일봉'),row=1,col=1)
+for col,name,color in [('BB_upper','BB 상단','#6b77a5'),('BB_lower','BB 하단','#6b77a5'),('MA5','MA5','#1e9c76'),('MA10','MA10','#e07c39'),('MA20','MA20','#9b59b6'),('MA60','MA60','#4c637a')]:
+    fig.add_trace(go.Scatter(x=plot.index,y=plot[col],mode='lines',name=name,line=dict(width=1.3,color=color)),row=1,col=1)
+for col,name,color,marker in [('A','A 매수','#159947','triangle-up'),('B','B 매수','#2386dd','triangle-up'),('exit','기술적 청산','#d13d3d','x')]:
+    subset=plot[plot[col]]
+    fig.add_trace(go.Scatter(x=subset.index,y=subset.Close,mode='markers',name=name,marker=dict(symbol=marker,size=11,color=color)),row=1,col=1)
+for r,n in [(2,5),(3,10),(4,20)]:
+    fig.add_trace(go.Scatter(x=plot.index,y=plot[f'K{n}'],name=f'K{n}',line=dict(color='#d34a4a',width=1.5)),row=r,col=1)
+    fig.add_trace(go.Scatter(x=plot.index,y=plot[f'D{n}'],name=f'D{n}',line=dict(color='#32865d',width=1.5)),row=r,col=1)
+    fig.add_hline(y=80,row=r,col=1,line_dash='dot',line_color='#aaaaaa')
+    fig.add_hline(y=20,row=r,col=1,line_dash='dot',line_color='#aaaaaa')
+    fig.update_yaxes(range=[0,100],row=r,col=1)
+fig.update_layout(height=980,xaxis_rangeslider_visible=False,legend=dict(orientation='h',y=-.07),margin=dict(l=5,r=5,t=55,b=40))
 st.plotly_chart(fig,use_container_width=True)
-st.subheader('자산 곡선')
-st.line_chart(eq.equity)
-st.subheader('완료 거래 내역')
-if len(trades):
-    st.dataframe(trades.sort_values('exit_date',ascending=False),use_container_width=True,hide_index=True)
-    st.download_button('거래 내역 CSV 저장',trades.to_csv(index=False).encode('utf-8-sig'),'trades.csv','text/csv')
-else:
-    st.info('선택한 기간에 완료된 거래가 없습니다. 전략 조건이 엄격할 수 있습니다.')
-st.download_button('지표·신호 CSV 저장',d.to_csv().encode('utf-8-sig'),'signals.csv','text/csv')
-st.warning('주의: 이 도구는 투자 조언이나 실시간 주문 시스템이 아닙니다. 과거 성과는 미래 수익을 보장하지 않습니다. 매매비용은 단순 근사이며 유동성, 체결 지연, 상장폐지, 데이터 품질 및 기업행동의 영향을 완전히 반영하지 않습니다. 마지막 미청산 포지션은 자산곡선에 시가평가로 반영되지만 완료 거래 표에는 포함되지 않습니다.')
+st.caption('차트의 매도 표식은 기술적 조건 발생일이며, 실제 보유 중 실행된 매도 거래와는 다를 수 있습니다.')
+
+st.header('A/B 전략별 백테스트')
+results=[]
+for strategy in ['A','B']:
+    trades,equity=backtest(valid,strategy,fee,hold)
+    metrics=summary(trades,equity)
+    results.append({'전략':strategy,'총수익률 (%)':round(metrics['total'],2),'최대낙폭 (%)':round(metrics['mdd'],2),'완료 거래':metrics['count'],'승률 (%)':round(metrics['win'],1)})
+    with st.expander(f'{strategy} 전략 거래 내역 ({len(trades)}건)'):
+        if trades.empty: st.write('완료된 거래가 없습니다.')
+        else: st.dataframe(trades.sort_values('exit_date',ascending=False),use_container_width=True)
+st.dataframe(pd.DataFrame(results),hide_index=True,use_container_width=True)
+st.caption('각 전략을 독립적으로 100% 투자한 가상 성과. 종가 신호→다음 거래일 시가 체결, 편도 거래비용 반영. 마지막 미청산 포지션은 종가 평가하며 완료 거래 승률에는 포함하지 않습니다. 배당·시장충격·거래정지·시가 갭에 따른 실제 체결 위험은 완전히 재현하지 못합니다.')
+st.warning('주의: 데이터 공급자의 수정주가(auto_adjust=True)를 사용합니다. 조정 OHLC와 실제 체결가격은 다를 수 있으며, 전략은 검증되지 않았습니다. 실거래 전 장기간/여러 종목의 표본외 검증이 필요합니다.')
