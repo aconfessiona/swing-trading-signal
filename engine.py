@@ -62,41 +62,74 @@ def prepare(raw):
     w['weekly_bb_upper']=w.Close.rolling(20,min_periods=20).mean()+2*w.Close.rolling(20,min_periods=20).std(ddof=0)
     for col in ['weekly_prior_high','weekly_bb_upper']:
         d[col]=w[col].shift(1).reindex(d.index,method='ffill').to_numpy()
-    # Confirmed support/reversal price action is primary; stochastic is informational only.
-    atr=d.ATR14.fillna(c*.03)
+    # REGIME ENGINE: classify using only information available by this close.
+    atr=d.ATR14.fillna(c*.025)
     near=lambda level,tol: level.notna() & (d.Low<=level+tol) & (d.High>=level-tol)
-    support_tests=[near(d.BB_lower,atr*.4),near(d.support,atr*.55),near(d.prior_low60,atr*.6),near(d.trend_support,atr*.6)]
-    for f in [.236,.382,.5,.618]:support_tests.append(near(d[f'fib_{f}'],atr*.4))
-    d['support_hits']=sum(s.astype(int) for s in support_tests)
-    body=(d.Close-d.Open);span=(d.High-d.Low).replace(0,np.nan)
-    bullish=(body>0)&((d.Close-d.Low)/span>.62)
+    body=d.Close-d.Open
+    span=(d.High-d.Low).replace(0,np.nan)
+    bullish=(body>0)&((d.Close-d.Low)/span>.65)
     rejection=((d[['Open','Close']].min(axis=1)-d.Low)/span>.35)&(d.Close>d.Low+span*.55)
-    d['reversal_candle']=(bullish|rejection)&(d.Close>=d.Close.shift(1)*.985)
-    d['uptrend']=(d.MA20>d.MA60)&(d.MA20>d.MA20.shift(5))
-    d['pullback']=d.uptrend & near(d.MA20,atr*.7) & (d.Close>d.MA60)
-    d['breakout_retest']=(d.Close>d.resistance.shift(1)*.985)&(d.Low<=d.resistance.shift(1)*1.025)&(d.Close>d.Open)
-    # Prevent a chased entry near resistance or after a fast spike.
-    d['overextended']=(d.Close>d.MA20*1.085)|(c/c.shift(5)>1.13)|(d.RSI14>73)
-    # Balanced entry: never buy merely on an oversold reading or a single support touch.
-    # Confirmation requires a prior test, recovery above a recent high, and an improving base.
-    recent_support=d.support_hits.shift(1).rolling(8,min_periods=1).max().fillna(0)>=1
-    swing_low=d.Low.shift(1).rolling(12,min_periods=6).min()
-    older_low=d.Low.shift(13).rolling(18,min_periods=8).min()
-    stabilizing=(swing_low>=older_low*.975)&(c>c.shift(3))
+    d['reversal_candle']=(bullish|rejection)&(c>c.shift(1)*.985)
+    d['ma20_below_days']=(c<d.MA20).astype(int).groupby((c>=d.MA20).cumsum()).cumsum()
+    # Prior-confirmed pivots only: never use a pivot until three bars have elapsed.
+    recent_high=d.resistance.shift(1)
+    recent_low=d.support.shift(1)
+    failed_high=(d.High>=recent_high*.985)&(c<recent_high*.985)&(c<c.shift(1))
+    # A breakout is recorded only after a completed close above prior resistance.
+    breakout=(c>recent_high*1.01)&(c.shift(1)<=recent_high.shift(1)*1.01)
+    breakout_level=recent_high.where(breakout).ffill()
+    bars_since_breakout=pd.Series(np.arange(len(d)),index=d.index)-pd.Series(np.arange(len(d)),index=d.index).where(breakout).ffill()
+    failed_breakout=(bars_since_breakout.between(1,8))&(c<breakout_level*.99)
+    d['failed_high']=failed_high.fillna(False)
+    d['failed_breakout']=failed_breakout.fillna(False)
+    # Confirmed swing low breach is a structural break, not a routine MA20 touch.
+    low_break=(c<recent_low*.985)&(c.shift(1)>=recent_low.shift(1)*.985)
+    ma_weak=d.ma20_below_days>=3
+    slope_down=d.MA20<d.MA20.shift(5)*.995
+    ma_bear=(d.MA20<d.MA60)&slope_down
+    d['risk_score']=(ma_weak.astype(int)*2 + failed_high.astype(int)*2 + failed_breakout.astype(int)*2 + low_break.astype(int)*3 + ma_bear.astype(int)*2 + ((c<c.shift(1))&(d.volume_ratio>=1.3)).astype(int))
+    # Hold failed-high / false-breakout warnings briefly; don't instantly forget them.
+    risk_recent=d.risk_score.rolling(5,min_periods=1).max()
+    prior_box_high=d.High.shift(1).rolling(40,min_periods=30).max()
+    prior_box_low=d.Low.shift(1).rolling(40,min_periods=30).min()
+    box_width=prior_box_high/prior_box_low-1
+    flat20=(d.MA20/d.MA20.shift(10)-1).abs()<.035
+    flat60=(d.MA60/d.MA60.shift(10)-1).abs()<.045
+    box=(box_width<.22)&flat20&flat60
+    up=(d.MA20>d.MA60)&(d.MA20>d.MA20.shift(5)*1.004)&(c>d.MA60)&(~low_break)
+    down=((d.MA20<d.MA60)&slope_down&ma_weak)|(low_break&ma_weak)
+    warning=((risk_recent>=4)&(~box)) | (failed_breakout&ma_weak)
+    # priority: confirmed down / transition / box / up / neutral
+    regime=np.select([down,warning,box,up],['하락','하락 전환 의심','횡보','상승'],default='중립')
+    d['regime']=pd.Series(regime,index=d.index)
+    d['box_low']=prior_box_low
+    d['box_high']=prior_box_high
+    d['buy_blocked']=d.regime.isin(['하락','하락 전환 의심','중립'])
+    # Uptrend: require actual pullback to rising MA or established support, then reclaim.
+    pullback_test=(d.Low.shift(1).rolling(5,min_periods=3).min()<=d.MA20.shift(1).rolling(5,min_periods=3).max()*1.012)
+    higher_low=(d.Low.shift(1).rolling(5,min_periods=3).min()>d.Low.shift(7).rolling(12,min_periods=8).min()*.985)
     confirmation=(c>d.High.shift(1))&(c>d.Open)&(c>c.shift(2))
-    recovery=(c>d.MA20)&(d.MA20>=d.MA20.shift(4)*.995)
-    # Uptrend pullback: reclaim prior day's high near a rising MA20, without chasing.
-    pullback_recent=(d.Low.shift(1).rolling(6,min_periods=3).min()<=d.MA20.shift(1).rolling(6,min_periods=3).max()*1.015)
-    uptrend_pullback=d.uptrend&pullback_recent&confirmation&(c>d.MA20)&(c>d.MA60)
-    # Base reversal: wait for a higher low AND an MA20 reclaim, not the first falling-knife bounce.
-    base_reversal=recent_support&stabilizing&confirmation&recovery
-    # Breakout-retest: resistance level must have been crossed earlier, then tested as support.
-    level=d.resistance.shift(3)
-    breakout_seen=(d.Close.shift(1).rolling(5,min_periods=2).max()>level*1.015)
-    retest=breakout_seen&(d.Low<=level*1.025)&(d.Low>=level*.965)&confirmation&(c>level)&(c>d.MA20)
-    d['buy_candidate']=((d.support_hits>=1)|d.pullback|d.breakout_retest)&~d.overextended
-    d['buy_confirmed']=(base_reversal|uptrend_pullback|retest)&~d.overextended
-    d['buy_score']=d.support_hits.clip(upper=4)*2+d.reversal_candle.astype(int)*2+d.pullback.astype(int)*2+d.breakout_retest.astype(int)*2+(d.volume_ratio>=1.3).astype(int)
+    up_buy=(d.regime=='상승')&pullback_test&higher_low&confirmation&(c>d.MA20)&(c<d.MA20*1.065)
+    # Box: bottom 20% of *previous* box, with BB lower contact and a rejection.
+    box_pos=(c-prior_box_low)/(prior_box_high-prior_box_low).replace(0,np.nan)
+    near_box=(d.Low<=prior_box_low+(prior_box_high-prior_box_low)*.18)&(c>=prior_box_low*.99)
+    bb_test=d.Low<=d.BB_lower+atr*.45
+    box_buy=(d.regime=='횡보')&near_box&bb_test&d.reversal_candle&(box_pos<.35)
+    # Downtrend reversal is separate: a confirmed breakout, followed by a later retest.
+    # The 'transition' regime does not buy on a one-day bounce.
+    breakout_recent=bars_since_breakout.between(2,12)
+    retest=(d.Low<=breakout_level*1.025)&(d.Low>=breakout_level*.965)&(c>breakout_level)&confirmation
+    recovered=(d.MA20>=d.MA20.shift(5))&(c>d.MA20)&(c>d.MA60*.985)
+    reversal_buy=(d.regime.isin(['상승','횡보']))&breakout_recent&retest&recovered&(~failed_breakout)
+    d['entry_type']=np.select([up_buy,box_buy,reversal_buy],['상승 눌림목','박스 하단','돌파 후 재지지'],default='')
+    d['buy_candidate']=((d.regime=='상승')&pullback_test)|((d.regime=='횡보')&near_box&bb_test)|((d.regime.isin(['상승','횡보']))&breakout_recent)
+    d['overextended']=(c>d.MA20*1.085)|(c/c.shift(5)>1.13)|(d.RSI14>75)
+    d['buy_confirmed']=(up_buy|box_buy|reversal_buy)&(~d.overextended)&(~d.buy_blocked)
+    d['support_hits']=(near(d.BB_lower,atr*.45).astype(int)+near(recent_low,atr*.6).astype(int)+near(d.trend_support,atr*.5).astype(int))
+    for f in [.236,.382,.5,.618]:d['support_hits']+=near(d[f'fib_{f}'],atr*.4).astype(int)
+    d['buy_score']=d.support_hits.clip(upper=4)*2+d.reversal_candle.astype(int)*2+(d.volume_ratio>=1.3).astype(int)
+    d['pullback']=pullback_test
+    d['breakout_retest']=reversal_buy
     # Resistance proximity and bearish price reaction; no stochastic gating.
     resistance_levels=['BB_upper','resistance','prior_high60','weekly_prior_high','weekly_bb_upper','trend_upper_approx']
     d['resistance_hits']=sum(near(d[col],atr*.55).astype(int) for col in resistance_levels)
@@ -156,5 +189,5 @@ def simulate(d,fee_bps=15,atr_multiple=2.5,max_hold=40):
             elif stage==1 and i-last_sell>=5 and cl>entry_price*1.11 and bool(r.sell_confirmed) and peak>entry_price*1.13:
                 pending=('sell2','추가 저항 확인·수익 구간',date)
         elif i-last_exit>=cooldown and bool(r.buy_confirmed):
-            pending=('buy','지지 구조·반등 확인',date)
+            pending=('buy',str(r.entry_type),date)
     return pd.DataFrame(events,columns=['signal_date','date','action','reason','price','fraction']),pd.Series([v for _,v in equity],index=[t for t,_ in equity],name='equity',dtype=float),units>0
