@@ -1,45 +1,40 @@
-# 스윙 매매 분석 시스템 5.0 A/B
+# Swing Analysis 5.0 C/D
 
-**시장 국면 판별 및 매수 금지 사유 검증 전용 버전.** 실제 주문, 매수 확정, 모의 체결, 수익률 계산은 수행하지 않습니다.
+## Upload files (exact filenames)
+- `app.py` — Streamlit mobile-friendly dashboard
+- `engine.py` — causal market regimes, structural support/resistance zones, deduplicated interest events, momentum
+- `requirements.txt` — dependencies
+- `README.md` — this guide
 
-## 업로드할 파일 이름 (GitHub 저장소 최상위에 정확히 이 이름으로)
+GitHub repo: `swing-trading-signal`, branch `main`. Upload/replace all four files together. Streamlit Cloud main file: `app.py`.
 
-1. `app.py` — Streamlit 화면과 차트
-2. `engine.py` — 국면 판별 및 매수 금지 로직
-3. `requirements.txt` — Python 패키지
-4. `README.md` — 안내 문서
+Suggested commit: `Add Swing Analysis 5.0 C/D structural zones and momentum dashboard`
 
-네 파일 모두 **같은 버전으로 교체**하세요. ZIP 자체를 GitHub에 업로드하는 것이 아니라 ZIP을 풀어 나온 4개 파일을 업로드합니다.
+## Usage
 
-## iPhone에서 GitHub 업로드
+Run `pip install -r requirements.txt` then `streamlit run app.py`.
+Enter ticker such as `373220.KS`, `005930.KS`, `AAPL`, or upload daily OHLCV CSV with `Date,Open,High,Low,Close,Volume`.
 
-1. `swing-trading-signal` 저장소의 `main` 브랜치에 들어갑니다.
-2. 녹색 `Code` 버튼 옆의 `···` → `Upload files`를 누릅니다.
-3. 위 네 파일을 모두 선택합니다. 같은 이름이 있다면 기존 파일을 교체하는 커밋으로 업로드합니다.
-4. `Commit changes`로 저장합니다.
-5. Streamlit Cloud 앱에서 재실행 또는 Reboot하여 `5.0 A/B` 제목을 확인합니다.
-6. `app.py`와 `engine.py`가 서로 다른 버전이면 오류가 나므로 파일명을 변경하지 마세요.
+## Locked B-policy parameters
+- 20-day moving average below for 3 sessions
+- 1% confirmed swing-high breakout
+- 10-session retest window
+- 1.8 reward/risk minimum for future trade engine (not yet calculated)
+- ADX(14) 18 reference threshold
+- Downtrend and weak-uptrend prohibit new buys.
 
-## 분석 규칙
+## Implemented in 5.0 C/D
+- Retains A/B causal regime/buy-block engine.
+- Confirms 5-bar pivots after two following bars, no lookahead in calculations.
+- Groups historical confirmed daily pivot levels within 0.75 ATR.
+- Identifies one representative watch event per support group (not a buy).
+- Shows current support/resistance zones and separate ATR-normalized MACD histogram.
+- Displays market status, detailed reasons, and downloadable daily diagnostics.
+- Mobile responsive layout, reduced overlays and selectable indicators.
 
-- 20일선 아래 **3거래일 연속**: 상승 약화 경고
-- 이전 확정 고점 **종가 1% 초과 돌파**: 상승 전환 준비
-- 돌파 후 **10거래일 이내 재지지**: 전환 확인 경로
-- ADX(14) **18**: 참고 기준. 방향 판단은 구조와 이동평균 우선
-- 기대 손익비 **1.8:1**: 다음 버전의 매수 신호 필터로 예약. 이 버전은 실제 진입/손절/목표가를 계산하지 않으므로 RR 합격을 표시하지 않습니다.
-- 5봉 피벗은 **2개 봉이 추가로 완성된 뒤** 확인되며 과거 신호를 소급 생성하지 않습니다.
-- 하락/상승 약화/전환 준비/판별 유보 상태는 매수 금지.
-- 볼린저 하단과 과거 지지선은 **관심**만 표시하며 매수 신호가 아닙니다.
-
-## CSV
-
-`Date,Open,High,Low,Close,Volume` 열을 가진 일봉 CSV를 업로드할 수 있습니다. 충분한 과거 데이터(최소 140봉)가 필요합니다. 인터넷 연결 시 Yahoo Finance의 조정 OHLC 데이터를 가져옵니다.
-
-## 검증
-
-```bash
-python -m py_compile app.py engine.py
-python -m unittest discover -s tests -v
-```
-
-테스트는 제공된 `tests/test_engine.py`를 별도로 실행할 수 있으며, GitHub 업로드 필수 파일은 위 4개뿐입니다. 다양한 종목에 대해 날짜별 국면 및 매수 차단 이유를 확인하세요. 실거래 성능은 아직 검증되지 않았습니다.
+## Important limitations
+- No actual buy/sell orders, position management, or backtest P&L in this version.
+- Elliott wave labeling, weekly pivot confirmation, Fibonacci retracement, 30/30/40 exits are planned, not implemented.
+- The support importance score is a heuristic ranking, not a calibrated probability.
+- Horizontal current support/resistance shading is a *current-day visual guide*, not a historically available price series. The CSV contains daily as-of calculations.
+- This is experimental technical analysis, not financial advice or a verified profitable strategy.

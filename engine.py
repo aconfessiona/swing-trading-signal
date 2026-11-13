@@ -152,3 +152,138 @@ def analyze(raw, ma_below_days=3, breakout_pct=0.01, retest_days=10, min_rr=1.8,
         d.at[d.index[i],'reversal_route']='전고점 돌파 후 재지지' if regime in ('REVERSAL_PREP','REVERSAL_CONFIRMED') else ''
     d.attrs['settings']={'ma_below_days':ma_below_days,'breakout_pct':breakout_pct,'retest_days':retest_days,'min_rr':min_rr,'adx_ref':adx_ref}
     return d
+
+# 5.0 C/D: causal structural zones, deduplicated watch events, momentum diagnostics.
+VERSION = '5.0-C/D'
+
+
+def analyze_cd(raw, **settings):
+    d = analyze(raw, **settings)
+    c = d['Close']
+    ema12 = c.ewm(span=12, adjust=False, min_periods=26).mean()
+    ema26 = c.ewm(span=26, adjust=False, min_periods=26).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False, min_periods=9).mean()
+    hist = macd - signal
+    d['MACD_hist'] = hist
+    # Dimensionless oscillator: relative to ATR, not arbitrary stock price scale.
+    d['momentum_wave'] = (hist / d['ATR'].replace(0, np.nan)).clip(-2, 2)
+    delta = c.diff()
+    up = delta.clip(lower=0).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    down = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = up / down.replace(0, np.nan)
+    d['RSI14'] = 100 - 100/(1+rs)
+    d.loc[(down == 0) & (up > 0), 'RSI14'] = 100
+    d.loc[(down == 0) & (up == 0), 'RSI14'] = 50
+    d['momentum_state'] = np.where(d.momentum_wave >= 0, '상승 모멘텀', '하락 모멘텀')
+    d['momentum_fading'] = np.where(d.momentum_wave >= 0,
+        d.momentum_wave < d.momentum_wave.shift(1),
+        d.momentum_wave > d.momentum_wave.shift(1))
+
+    # Pivots are recorded on their confirmation bar only. Zone centers are made
+    # from historical, already confirmed support/resistance pivots, not future extrema.
+    d['support_zone_low'] = np.nan
+    d['support_zone_high'] = np.nan
+    d['support_strength'] = 0
+    d['resistance_zone_low'] = np.nan
+    d['resistance_zone_high'] = np.nan
+    d['zone_watch'] = False
+    d['zone_watch_reason'] = ''
+    d['zone_id'] = ''
+    d['decision_summary'] = ''
+    d['reversal_step'] = ''
+    d['support_levels'] = ''
+    d['resistance_levels'] = ''
+    lows, highs = [], []
+    watched = {}  # keyed by stable anchor pivot confirmation date, one event per zone
+    cooldown = 10
+    for i in range(len(d)):
+        r = d.iloc[i]
+        date = d.index[i]
+        atr = float(r.ATR) if pd.notna(r.ATR) else np.nan
+        close = float(r.Close)
+        if pd.notna(r.pivot_low_confirmed):
+            lows.append((i, float(r.pivot_low_confirmed)))
+        if pd.notna(r.pivot_high_confirmed):
+            highs.append((i, float(r.pivot_high_confirmed)))
+        # Use pivots confirmed within last 250 trading sessions.
+        lows = [(j, v) for j, v in lows if i-j <= 250]
+        highs = [(j, v) for j, v in highs if i-j <= 250]
+        if not np.isfinite(atr) or atr <= 0 or i < 100:
+            continue
+        tolerance = 0.75 * atr
+        def groups(points):
+            # Cluster already-confirmed pivots by price; no use of future bars.
+            result = []
+            for j, v in sorted(points, key=lambda x: x[1]):
+                match = next((g for g in result if abs(v - g['center']) <= tolerance), None)
+                if match is None:
+                    result.append({'center': v, 'members': [(j, v)]})
+                else:
+                    match['members'].append((j, v))
+                    match['center'] = float(np.median([x[1] for x in match['members']]))
+            return result
+        support_candidates = [g for g in groups(lows) if g['center'] <= close + 0.75*atr]
+        resist_candidates = [g for g in groups(highs) if g['center'] >= close - 0.75*atr]
+        # Candidate prioritization: close to price, repeated confirmed pivots, recency.
+        def rank(g):
+            touches = len(g['members'])
+            distance = abs(close-g['center']) / atr
+            age = i-max(j for j,_ in g['members'])
+            return min(touches, 4)*24 + max(0, 25-6*distance) + max(0, 15-age/15)
+        sg = max(support_candidates, key=rank) if support_candidates else None
+        rg = min(resist_candidates, key=lambda g: (max(0, g['center']-close), -len(g['members']))) if resist_candidates else None
+        if sg:
+            center = sg['center']
+            width = 0.45*atr
+            strength = min(100, int(round(rank(sg))))
+            d.at[date, 'support_zone_low'] = center-width
+            d.at[date, 'support_zone_high'] = center+width
+            d.at[date, 'support_strength'] = strength
+            d.at[date, 'support_levels'] = f'{center:,.0f} / 확정 저점 {len(sg["members"])}개'
+            # One interest event per support anchor; cooldown + price-zone rearm.
+            anchor = min(j for j,_ in sg['members'])
+            key = f's{anchor}'
+            near = float(r.Low) <= center+width and float(r.High) >= center-width
+            prev_event = watched.get(key)
+            # Only meaningful structural support; BB contact is auxiliary, never enough.
+            if near and strength >= 65 and prev_event is None:
+                d.at[date, 'zone_watch'] = True
+                d.at[date, 'zone_watch_reason'] = f'확정 저점 {len(sg["members"])}개 기반 지지 영역 첫 접근 (매수 아님)'
+                d.at[date, 'zone_id'] = key
+                watched[key] = i
+            elif near and prev_event is not None and i-prev_event >= cooldown:
+                # Do not generate repeated markers; persistent zones are represented by a band.
+                pass
+        if rg:
+            center = rg['center']
+            d.at[date, 'resistance_zone_low'] = center-0.45*atr
+            d.at[date, 'resistance_zone_high'] = center+0.45*atr
+            d.at[date, 'resistance_levels'] = f'{center:,.0f} / 확정 고점 {len(rg["members"])}개'
+        regime = str(r.regime)
+        if regime == 'DOWN':
+            step = '하락 추세 · 바닥 탐색'
+        elif regime == 'REVERSAL_PREP':
+            step = '돌파 후 재지지 확인 대기'
+        elif regime == 'REVERSAL_CONFIRMED':
+            step = '상승 전환 구조 확인'
+        elif regime == 'WEAK':
+            step = '상승 구조 훼손 경고'
+        elif regime == 'UP':
+            step = '상승 추세 유지'
+        elif regime == 'RANGE':
+            step = '횡보 박스 관찰'
+        else:
+            step = '구조 확인 대기'
+        d.at[date, 'reversal_step'] = step
+        if bool(r.buy_blocked):
+            decision = f'신규 매수 금지: {r.block_reasons}'
+        else:
+            decision = '기본 금지 조건 없음 · 진입/손절/목표가 및 손익비 미검증 (매수 신호 아님)'
+        if bool(d.at[date, 'zone_watch']):
+            decision += ' | 주요 지지 관심 구간'
+        d.at[date, 'decision_summary'] = decision
+    # Replace noisy A/B watch with structural, deduplicated C/D watch.
+    d['watch'] = d['zone_watch'].astype(bool)
+    d['watch_reason'] = d['zone_watch_reason']
+    return d
