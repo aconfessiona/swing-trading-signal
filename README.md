@@ -1,15 +1,14 @@
-# Swing Analysis 5.3 — C Mixed BB Sell Opportunities
+# Swing Analysis 5.3.1 — Clean Sell Chart
 
-## Upload to GitHub
-Replace all four files in the repository root: `app.py`, `engine.py`, `requirements.txt`, `README.md`.
-Commit: `Add Swing Analysis 5.3 deduplicated sell opportunities and next-open fills`
+Replace these four files together in the GitHub repository root: `app.py`, `engine.py`, `requirements.txt`, `README.md`.
 
-## Changes
-- Independent sell-opportunity markers across the entire chart, even before a selected virtual entry.
-- Proactive Bollinger upper-band/RSI/resistance and reactive reversal candidates.
-- Strong-trend band-walk protection and per-wave deduplication.
-- Simulated 30% / 30% / remaining 40% exits, based on next-day open and protective stops.
-- Diagnostic table of candidate dates and reasons.
+Commit message: `Hide reactive sell candidates in Swing Analysis 5.3.1 chart`
 
-## Cautions
-Signals are exploratory and not validated for profitability. A virtual entry is not a confirmed buy signal. Resistance is based on confirmed daily pivots, not true volume-profile or weekly resistance. OHLC daily data cannot establish exact intraday sequence if stop and other prices are crossed in the same bar; protective stop takes priority. No future bars are used in signal calculations.
+## Changes from 5.3
+- Hide reactive (반락 익절 후보) markers from the chart; **retain their calculation** in the engine and CSV diagnostic output.
+- Keep proactive (선제 익절 후보) markers, which are already limited per swing by the 5.3 engine.
+- Show only proactive candidates in the candidate summary table.
+- Keep support watch, simulated entries, 30/30 partial sales, protective exits, moving averages, Bollinger bands, and resistance lines unchanged.
+
+## Important
+Proactive candidate markers are not actual executions. Simulated fills occur at next session open. Strategy performance is not validated. The engine's reactive signal can still influence its existing simulation; this update intentionally changes chart presentation, not trading rules.

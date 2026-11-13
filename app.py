@@ -7,9 +7,9 @@ import streamlit as st
 import yfinance as yf
 from engine import VERSION, analyze_53, simulate_held_position_53
 
-st.set_page_config(page_title='Swing Analysis 5.3',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
+st.set_page_config(page_title='Swing Analysis 5.3.1',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
 st.markdown('<style>.block-container{max-width:1100px;padding-top:1rem}@media(max-width:680px){.block-container{padding-left:.6rem;padding-right:.6rem}}[data-testid="stMetric"]{border:1px solid #e5e7eb;border-radius:12px;padding:10px}</style>',unsafe_allow_html=True)
-st.title('📈 스윙 매매 분석 5.3 · 매도 기회 분리')
+st.title('📈 스윙 매매 분석 5.3.1 · 차트 간소화')
 st.caption('볼린저 상단 · 밴드 워크 보호 · 다중 기간 저항 · 가상 30/30/40 분할 매도')
 with st.expander('종목 및 차트 설정',expanded=True):
     ticker=st.text_input('종목 코드',value='373220.KS').strip().upper()
@@ -18,7 +18,7 @@ with st.expander('종목 및 차트 설정',expanded=True):
     period=y.selectbox('표시 기간',['3개월','6개월','1년','전체'],index=1)
     show_ma=st.checkbox('20·60일선',True)
     show_levels=st.checkbox('단기·중기·장기 저항',True)
-    show_markers=st.checkbox('전체 차트 매도 후보 표시 (체결 아님)',True)
+    show_markers=st.checkbox('선제 익절 후보 표시 (체결 아님)',True)
     show_watch=st.checkbox('기존 지지 관심 마커(매수 아님)',False)
     show_sim=st.checkbox('가상 보유 30/30/40 매도 체결 표시',False)
 @st.cache_data(ttl=1800,show_spinner=False)
@@ -68,7 +68,7 @@ if show_levels:
         if pd.notna(level):
             fig.add_trace(go.Scatter(x=[p.index[0],p.index[-1]],y=[level,level],mode='lines',name=name,line=dict(color=color,width=1.5,dash='dash'),hovertemplate=name+': %{y:,.0f}<extra></extra>'),row=1,col=1)
 if show_markers:
-    for col,name,color,symbol in [('early_exit','선제 익절 후보','#d6a34c','triangle-down'),('second_exit','반락 익절 후보','#d26370','triangle-down')]:
+    for col,name,color,symbol in [('early_exit','선제 익절 후보','#d6a34c','triangle-down')]:
         q=p[p[col]]
         if len(q):fig.add_trace(go.Scatter(x=q.index,y=q.High+q.ATR*.35,mode='markers',name=name,marker=dict(symbol=symbol,size=9,color=color),customdata=q.sell_reason,hovertemplate='%{x|%Y-%m-%d}<br>%{customdata}<extra></extra>'),row=1,col=1)
 if show_watch:
@@ -83,7 +83,7 @@ fig.add_trace(go.Bar(x=p.index,y=wave,name='모멘텀',marker_color=np.where(wav
 fig.add_hline(y=0,line_color='#a1a1aa',line_width=1,row=2,col=1)
 fig.update_layout(height=620,margin=dict(l=4,r=6,t=8,b=8),xaxis_rangeslider_visible=False,yaxis=dict(side='right',tickformat=',.0f',gridcolor='rgba(130,130,130,.12)'),yaxis2=dict(side='right',showgrid=False),legend=dict(orientation='h',y=-.12,font=dict(size=10)),plot_bgcolor='rgba(0,0,0,0)',paper_bgcolor='rgba(0,0,0,0)',hovermode='x unified',dragmode='pan')
 st.plotly_chart(fig,use_container_width=True,key='swing51chart',config={'displaylogo':False,'scrollZoom':True})
-st.caption('작은 삼각형=매도 후보(체결 아님) · 큰 마커=가상 보유 체결. 저항선은 최신 기준 3개만 표시하며 과거 시점의 저항을 의미하지 않습니다.')
+st.caption('작은 주황 삼각형=선제 익절 후보(체결 아님) · 반락 후보는 차트에서 숨김 · 큰 마커=가상 보유 체결. 저항선은 최신 기준 3개만 표시하며 과거 시점의 저항을 의미하지 않습니다.')
 st.subheader('매도 판단 근거')
 if last.strong_protect:st.success('밴드 워크 보호 중: 볼린저 상단 접촉만으로 매도하지 않음')
 elif last.sell_confirm:st.warning('반락 확인 조건 충족: 보유 중이라면 다음 거래일 시가 기준으로 판단')
@@ -94,15 +94,15 @@ a,b,c=st.columns(3)
 for box,col,name in [(a,'short_resistance','단기 60일'),(b,'mid_resistance','중기 180일'),(c,'long_resistance','장기 756일')]:
     box.metric(name,f'{last[col]:,.0f}' if pd.notna(last[col]) else '미확인')
 st.caption('현재가 위의 확정 피벗 고점 중 가장 가까운 값. 주봉·매물대는 아직 미구현입니다.')
-st.subheader('매도 후보 발생 내역')
-selected=d[d.sell_confirm][['Close','BB_upper','RSI14','regime','sell_candidate_type','sell_candidate_score','sell_reason']].tail(30).iloc[::-1].copy()
+st.subheader('선제 익절 후보 발생 내역')
+selected=d[d.early_exit][['Close','BB_upper','RSI14','regime','sell_candidate_type','sell_candidate_score','sell_reason']].tail(30).iloc[::-1].copy()
 st.dataframe(selected,use_container_width=True,height=230)
 st.caption('후보는 가상 진입일과 무관하게 표시됩니다. 실제 체결은 포지션 보유 중일 때만 별도 마커로 표시합니다.')
 st.subheader('날짜별 판단 기록')
 cols=['Close','regime','buy_blocked','BB_upper','percent_b','band_walk','strong_protect','sell_watch','sell_score','early_exit','second_exit','sell_confirm','sell_reason','sell_block_reason','sell_candidate_score','short_resistance','mid_resistance','long_resistance']
 record=d[cols].tail(n).iloc[::-1].copy();record.index=record.index.strftime('%Y-%m-%d')
 st.dataframe(record,use_container_width=True,height=300)
-st.download_button('전체 분석 CSV',d[cols].to_csv(index_label='Date').encode('utf-8-sig'),file_name='swing_5_3_diagnostics.csv',mime='text/csv')
+st.download_button('전체 분석 CSV',d[cols].to_csv(index_label='Date').encode('utf-8-sig'),file_name='swing_5_3_1_diagnostics.csv',mime='text/csv')
 if events:st.dataframe(pd.DataFrame(events),hide_index=True,use_container_width=True)
 with st.expander('제한 사항'):
     st.write('매수 신호는 미구현. 가상 진입은 매수 정책 통과를 의미하지 않음. 저항은 일봉 확정 고점이며 주봉/가격별 거래량 매물대는 미구현. 전략 수익성은 아직 검증하지 않음.')

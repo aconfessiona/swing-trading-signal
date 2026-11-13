@@ -403,7 +403,7 @@ def simulate_held_position(d, entry_date, fee_rate=.00015, slippage=.0005):
     return events, {'entry':entry,'remaining':qty,'realized_pnl_per_initial_share':realized-entry*fee_rate,'unrealized_pnl_per_initial_share':unrealized,'pending':pending}
 
 # 5.3: separate diagnostic sell opportunities from position executions.
-VERSION = '5.3-C-BB-SELL-OPPORTUNITIES'
+VERSION = '5.3.1-C-CLEAN-CHART'
 
 def analyze_53(raw, **settings):
     d = analyze_51(raw, **settings)
