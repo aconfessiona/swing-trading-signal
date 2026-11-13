@@ -287,3 +287,126 @@ def analyze_cd(raw, **settings):
     d['watch'] = d['zone_watch'].astype(bool)
     d['watch_reason'] = d['zone_watch_reason']
     return d
+
+# 5.1: causal, diagnostic sell engine. This module does not produce buy signals.
+VERSION = '5.1-C-MIXED'
+
+def analyze_51(raw, **settings):
+    d = analyze_cd(raw, **settings)
+    c = d.Close
+    width = (d.BB_upper-d.BB_lower).replace(0, np.nan)
+    d['percent_b'] = (c-d.BB_lower)/width
+    d['bb_touch'] = d.High >= d.BB_upper*.99
+    d['bb_reentry'] = (c.shift(1)>=d.BB_upper.shift(1)) & (c<d.BB_upper)
+    d['bearish_break'] = c<d.Low.shift(1)
+    d['hist_fading2'] = (d.MACD_hist<d.MACD_hist.shift(1)) & (d.MACD_hist.shift(1)<d.MACD_hist.shift(2))
+    d['band_walk'] = ((d.percent_b>=.8).rolling(5,min_periods=5).sum()>=3) & (d.MA20>d.MA20.shift(5)) & (d.regime=='UP') & (d.Close>=d.last_low.fillna(-np.inf)*.99)
+    d['strong_protect'] = False
+    d['sell_watch'] = False
+    d['sell_confirm'] = False
+    d['sell_reason'] = ''
+    d['sell_score'] = 0
+    d['resistance_near'] = False
+    d['short_resistance'] = np.nan
+    d['mid_resistance'] = np.nan
+    d['long_resistance'] = np.nan
+    # Confirmed highs are available only from confirmation dates. Rolling horizon
+    # refers to the confirmation date, not the eventual historical pivot date.
+    highs=[]
+    protect=False
+    off_count=0
+    last_watch_i=-999
+    for i in range(len(d)):
+        r=d.iloc[i]; idx=d.index[i]
+        if pd.notna(r.pivot_high_confirmed): highs.append((i,float(r.pivot_high_confirmed)))
+        if i<100 or pd.isna(r.ATR) or r.ATR<=0: continue
+        atr=float(r.ATR); price=float(r.Close)
+        for window,col in ((60,'short_resistance'),(180,'mid_resistance'),(756,'long_resistance')):
+            candidates=[v for j,v in highs if i-j<=window and v>price+0.15*atr]
+            if candidates:d.at[idx,col]=min(candidates)
+        # The nearest confirmed high above price; do not call the BB upper a structural resistance.
+        near_levels=[v for col in ('short_resistance','mid_resistance','long_resistance') if pd.notna(v:=d.at[idx,col])]
+        near=bool(near_levels and r.High>=min(near_levels)-.5*atr)
+        d.at[idx,'resistance_near']=near
+        touch=bool(r.bb_touch or near)
+        # Band walk has hysteresis: once entered, protection remains until explicit release.
+        if bool(r.band_walk): protect=True;off_count=0
+        elif protect:
+            off_count=off_count+1 if r.percent_b<.8 and bool(r.hist_fading2) else 0
+            broken_pivot=pd.notna(r.last_low) and price<r.last_low*.99
+            ma_broken=(i>=1 and price<r.MA20 and d.Close.iloc[i-1]<d.MA20.iloc[i-1])
+            if broken_pivot or ma_broken or off_count>=3: protect=False;off_count=0
+        d.at[idx,'strong_protect']=protect
+        watch_event=touch and (i-last_watch_i>=7)
+        if watch_event:last_watch_i=i
+        d.at[idx,'sell_watch']=watch_event
+        score=sum((bool(r.bb_reentry),bool(r.bearish_break),bool(r.hist_fading2),near))
+        d.at[idx,'sell_score']=score
+        if protect:
+            d.at[idx,'sell_reason']='밴드 워크 보호: 상단 접촉만으로 매도하지 않음'
+            continue
+        active_watch=touch and i-last_watch_i<=5
+        if r.regime=='RANGE':
+            confirm=active_watch and (bool(r.bb_reentry) or bool(r.bearish_break))
+        else:
+            confirm=active_watch and score>=2 and (bool(r.bb_reentry) or bool(r.bearish_break))
+        d.at[idx,'sell_confirm']=bool(confirm)
+        if confirm:
+            why=[]
+            if r.bb_reentry:why.append('볼린저 상단 재진입')
+            if r.bearish_break:why.append('전일 저가 하향 돌파')
+            if r.hist_fading2:why.append('MACD 2일 둔화')
+            if near:why.append('확정 고점 저항 접근')
+            d.at[idx,'sell_reason']=' + '.join(why)
+        elif touch:d.at[idx,'sell_reason']='상단/저항 접근: 반락 확인 대기'
+    return d
+
+
+def simulate_held_position(d, entry_date, fee_rate=.00015, slippage=.0005):
+    """Illustrative long-only position entered on a user-selected date's NEXT open.
+    Signal on close -> execution next open; a stop hit intraday executes at stop
+    or worse next-open gap. Does not imply that the entry was a valid buy signal.
+    """
+    entry_loc=d.index.searchsorted(pd.Timestamp(entry_date),side='right')
+    if entry_loc>=len(d):raise ValueError('선택 날짜 이후 거래일이 없습니다.')
+    entry=float(d.Open.iloc[entry_loc])*(1+slippage)
+    qty=1.;sold=0.;first_high=entry;initial_qty=1.
+    stop=entry-2*float(d.ATR.iloc[entry_loc])
+    if not np.isfinite(stop) or stop<=0:raise ValueError('진입일 ATR 계산이 불가능합니다.')
+    events=[{'date':d.index[entry_loc],'action':'가상 진입','price':entry,'fraction':0.,'reason':'사용자 선택일 다음 시가 · 매수 신호 아님'}]
+    pending=None; first_sell_level=np.nan;last_sale_i=-999;realized=0.
+    for i in range(entry_loc+1,len(d)):
+        r=d.iloc[i]; idx=d.index[i]
+        op=float(r.Open); low=float(r.Low)
+        # Fill prior-close signal at next open. Protective gap exit takes priority.
+        if op<=stop or low<=stop:
+            price=min(op,stop)*(1-slippage)
+            realized+=qty*(price-entry)-qty*price*fee_rate
+            events.append({'date':idx,'action':'보호 청산','price':price,'fraction':qty,'reason':'손절/추적 손절선 도달'})
+            qty=0;break
+        if pending and qty>0:
+            fraction=min(pending['fraction'],qty)
+            price=op*(1-slippage)
+            realized+=fraction*(price-entry)-fraction*price*fee_rate
+            qty-=fraction;sold+=fraction;last_sale_i=i
+            events.append({'date':idx,'action':pending['action'],'price':price,'fraction':fraction,'reason':pending['reason']})
+            if sold>=.3 and sold<.6:first_sell_level=price
+            pending=None
+        if qty<=1e-8:break
+        # Stop may only tighten. Today's close-derived stop is effective tomorrow.
+        if i>=entry_loc+2:
+            prior=d.iloc[i-1]
+            if pd.notna(prior.last_low) and pd.notna(prior.ATR):
+                stop=max(stop,float(prior.last_low)-.5*float(prior.ATR))
+        # Risk-off conditions at today's close -> next-open exit.
+        if (pd.notna(r.last_low) and r.Close<r.last_low*.99) or (i>=2 and all(d.Close.iloc[j]<d.MA20.iloc[j] for j in range(i-2,i+1)) and r.regime in ('DOWN','WEAK')):
+            pending={'action':'보호 청산','fraction':qty,'reason':'종가 기준 구조 훼손'}
+        elif sold<.3 and bool(r.sell_confirm) and i>last_sale_i:
+            pending={'action':'1차 매도 30%','fraction':.3,'reason':str(r.sell_reason)}
+        elif .3-1e-8<=sold<.6 and i>last_sale_i+1 and bool(r.sell_confirm):
+            # Require price expansion beyond first exit and a new resistance event.
+            if r.High>first_sell_level+float(r.ATR) and bool(r.resistance_near):
+                pending={'action':'2차 매도 30%','fraction':.3,'reason':'새 가격 확장 + 저항 반락'}
+    # If a signal is pending on the last date, don't fabricate a fill.
+    unrealized=qty*(float(d.Close.iloc[-1])-entry)
+    return events, {'entry':entry,'remaining':qty,'realized_pnl_per_initial_share':realized-entry*fee_rate,'unrealized_pnl_per_initial_share':unrealized,'pending':pending}
