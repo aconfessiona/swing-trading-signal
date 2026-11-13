@@ -288,79 +288,70 @@ def analyze_cd(raw, **settings):
     d['watch_reason'] = d['zone_watch_reason']
     return d
 
-# 5.1: causal, diagnostic sell engine. This module does not produce buy signals.
-VERSION = '5.1-C-MIXED'
+# 5.2: proactive partial profit taking; signals known only after daily close.
+VERSION = '5.2-C-EARLY-EXIT'
 
 def analyze_51(raw, **settings):
     d = analyze_cd(raw, **settings)
-    c = d.Close
-    width = (d.BB_upper-d.BB_lower).replace(0, np.nan)
-    d['percent_b'] = (c-d.BB_lower)/width
-    d['bb_touch'] = d.High >= d.BB_upper*.99
-    d['bb_reentry'] = (c.shift(1)>=d.BB_upper.shift(1)) & (c<d.BB_upper)
-    d['bearish_break'] = c<d.Low.shift(1)
-    d['hist_fading2'] = (d.MACD_hist<d.MACD_hist.shift(1)) & (d.MACD_hist.shift(1)<d.MACD_hist.shift(2))
-    d['band_walk'] = ((d.percent_b>=.8).rolling(5,min_periods=5).sum()>=3) & (d.MA20>d.MA20.shift(5)) & (d.regime=='UP') & (d.Close>=d.last_low.fillna(-np.inf)*.99)
-    d['strong_protect'] = False
-    d['sell_watch'] = False
-    d['sell_confirm'] = False
-    d['sell_reason'] = ''
-    d['sell_score'] = 0
-    d['resistance_near'] = False
-    d['short_resistance'] = np.nan
-    d['mid_resistance'] = np.nan
-    d['long_resistance'] = np.nan
-    # Confirmed highs are available only from confirmation dates. Rolling horizon
-    # refers to the confirmation date, not the eventual historical pivot date.
-    highs=[]
-    protect=False
-    off_count=0
-    last_watch_i=-999
+    c=d.Close
+    width=(d.BB_upper-d.BB_lower).replace(0,np.nan)
+    d['percent_b']=(c-d.BB_lower)/width
+    d['bb_touch']=d.High>=d.BB_upper*.99
+    d['bb_reentry']=(c.shift(1)>=d.BB_upper.shift(1))&(c<d.BB_upper)
+    d['bearish_break']=c<d.Low.shift(1)
+    d['hist_fading2']=(d.MACD_hist<d.MACD_hist.shift(1))&(d.MACD_hist.shift(1)<d.MACD_hist.shift(2))
+    delta=c.diff();gain=delta.clip(lower=0).ewm(alpha=1/14,adjust=False,min_periods=14).mean();loss=(-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    d['RSI14']=100-100/(1+gain/loss.replace(0,np.nan))
+    d['band_walk']=((d.percent_b>=.8).rolling(5,min_periods=5).sum()>=3)&(d.MA20>d.MA20.shift(5))&(d.regime=='UP')&(d.Close>=d.last_low.fillna(-np.inf)*.99)
+    for name,value in [('strong_protect',False),('sell_watch',False),('sell_confirm',False),('sell_reason',''),('sell_score',0),('resistance_near',False),('early_exit',False),('second_exit',False),('short_resistance',np.nan),('mid_resistance',np.nan),('long_resistance',np.nan)]:d[name]=value
+    highs=[];protect=False;off_count=0;last_signal=-999;last_level=np.nan;last_event_high=np.nan;last_second=-999
     for i in range(len(d)):
-        r=d.iloc[i]; idx=d.index[i]
-        if pd.notna(r.pivot_high_confirmed): highs.append((i,float(r.pivot_high_confirmed)))
-        if i<100 or pd.isna(r.ATR) or r.ATR<=0: continue
-        atr=float(r.ATR); price=float(r.Close)
+        r=d.iloc[i];idx=d.index[i]
+        if pd.notna(r.pivot_high_confirmed):highs.append((i,float(r.pivot_high_confirmed)))
+        if i<100 or pd.isna(r.ATR) or r.ATR<=0:continue
+        atr=float(r.ATR);price=float(r.Close)
         for window,col in ((60,'short_resistance'),(180,'mid_resistance'),(756,'long_resistance')):
-            candidates=[v for j,v in highs if i-j<=window and v>price+0.15*atr]
+            candidates=[v for j,v in highs if i-j<=window and v>price+.15*atr]
             if candidates:d.at[idx,col]=min(candidates)
-        # The nearest confirmed high above price; do not call the BB upper a structural resistance.
-        near_levels=[v for col in ('short_resistance','mid_resistance','long_resistance') if pd.notna(v:=d.at[idx,col])]
-        near=bool(near_levels and r.High>=min(near_levels)-.5*atr)
+        levels=[float(d.at[idx,col]) for col in ('short_resistance','mid_resistance','long_resistance') if pd.notna(d.at[idx,col])]
+        near=bool(levels and r.High>=min(levels)-.5*atr)
         d.at[idx,'resistance_near']=near
         touch=bool(r.bb_touch or near)
-        # Band walk has hysteresis: once entered, protection remains until explicit release.
-        if bool(r.band_walk): protect=True;off_count=0
+        if bool(r.band_walk):protect=True;off_count=0
         elif protect:
             off_count=off_count+1 if r.percent_b<.8 and bool(r.hist_fading2) else 0
-            broken_pivot=pd.notna(r.last_low) and price<r.last_low*.99
-            ma_broken=(i>=1 and price<r.MA20 and d.Close.iloc[i-1]<d.MA20.iloc[i-1])
-            if broken_pivot or ma_broken or off_count>=3: protect=False;off_count=0
+            broken=pd.notna(r.last_low) and price<r.last_low*.99
+            ma_broken=i>=1 and price<r.MA20 and d.Close.iloc[i-1]<d.MA20.iloc[i-1]
+            if broken or ma_broken or off_count>=3:protect=False;off_count=0
         d.at[idx,'strong_protect']=protect
-        watch_event=touch and (i-last_watch_i>=7)
-        if watch_event:last_watch_i=i
-        d.at[idx,'sell_watch']=watch_event
-        score=sum((bool(r.bb_reentry),bool(r.bearish_break),bool(r.hist_fading2),near))
+        # Mark interest in the explanation only; never clutter chart with repeated circles.
+        d.at[idx,'sell_watch']=touch
+        score=sum([bool(r.bb_reentry),bool(r.bearish_break),bool(r.hist_fading2),near])
         d.at[idx,'sell_score']=score
-        if protect:
-            d.at[idx,'sell_reason']='밴드 워크 보호: 상단 접촉만으로 매도하지 않음'
-            continue
-        active_watch=touch and i-last_watch_i<=5
-        if r.regime=='RANGE':
-            confirm=active_watch and (bool(r.bb_reentry) or bool(r.bearish_break))
+        range_like=r.regime in ('RANGE','NEUTRAL') or (pd.notna(r.ADX) and r.ADX<18 and r.regime!='UP')
+        # Proactive exit uses close-known high touch + RSI or structure confluence.
+        # In a strong trend, require both structural resistance and momentum fading.
+        early=touch and (bool(pd.notna(r.RSI14) and r.RSI14>=65) or near)
+        if protect:early=bool(near and r.hist_fading2 and pd.notna(r.RSI14) and r.RSI14>=70)
+        elif not range_like:early=bool(early and (near or r.hist_fading2))
+        # New wave requires fresh extension > 1 ATR and at least 12 bars since signal.
+        fresh=i-last_signal>=12 and (not np.isfinite(last_event_high) or r.High>last_event_high+atr)
+        early=bool(early and fresh)
+        if early:
+            d.at[idx,'early_exit']=True
+            d.at[idx,'sell_confirm']=True
+            d.at[idx,'sell_reason']='선제적 1차 익절 후보: 상단/저항 + 과열 또는 저항 중첩'
+            last_signal=i;last_event_high=float(r.High);last_level=price
         else:
-            confirm=active_watch and score>=2 and (bool(r.bb_reentry) or bool(r.bearish_break))
-        d.at[idx,'sell_confirm']=bool(confirm)
-        if confirm:
-            why=[]
-            if r.bb_reentry:why.append('볼린저 상단 재진입')
-            if r.bearish_break:why.append('전일 저가 하향 돌파')
-            if r.hist_fading2:why.append('MACD 2일 둔화')
-            if near:why.append('확정 고점 저항 접근')
-            d.at[idx,'sell_reason']=' + '.join(why)
-        elif touch:d.at[idx,'sell_reason']='상단/저항 접근: 반락 확인 대기'
+            # Second-stage confirmation requires a NEW high after a prior first-stage event.
+            second=bool(np.isfinite(last_level) and i-last_signal>=3 and i-last_second>=12 and r.High>last_event_high+atr and (r.bb_reentry or r.bearish_break) and (r.hist_fading2 or near))
+            if second:
+                d.at[idx,'second_exit']=True;d.at[idx,'sell_confirm']=True
+                d.at[idx,'sell_reason']='새 고점 확장 이후 반락: 2차 익절 후보'
+                last_second=i;last_event_high=float(r.High)
+            elif protect:d.at[idx,'sell_reason']='밴드 워크 보호: 상단 접촉만으로 매도하지 않음'
+            elif touch:d.at[idx,'sell_reason']='상단/저항 관찰: 표시 생략'
     return d
-
 
 def simulate_held_position(d, entry_date, fee_rate=.00015, slippage=.0005):
     """Illustrative long-only position entered on a user-selected date's NEXT open.
@@ -401,11 +392,11 @@ def simulate_held_position(d, entry_date, fee_rate=.00015, slippage=.0005):
         # Risk-off conditions at today's close -> next-open exit.
         if (pd.notna(r.last_low) and r.Close<r.last_low*.99) or (i>=2 and all(d.Close.iloc[j]<d.MA20.iloc[j] for j in range(i-2,i+1)) and r.regime in ('DOWN','WEAK')):
             pending={'action':'보호 청산','fraction':qty,'reason':'종가 기준 구조 훼손'}
-        elif sold<.3 and bool(r.sell_confirm) and i>last_sale_i:
+        elif sold<.3 and bool(r.early_exit) and i>last_sale_i:
             pending={'action':'1차 매도 30%','fraction':.3,'reason':str(r.sell_reason)}
-        elif .3-1e-8<=sold<.6 and i>last_sale_i+1 and bool(r.sell_confirm):
+        elif .3-1e-8<=sold<.6 and i>last_sale_i+1 and bool(r.second_exit):
             # Require price expansion beyond first exit and a new resistance event.
-            if r.High>first_sell_level+float(r.ATR) and bool(r.resistance_near):
+            if r.High>first_sell_level+float(r.ATR):
                 pending={'action':'2차 매도 30%','fraction':.3,'reason':'새 가격 확장 + 저항 반락'}
     # If a signal is pending on the last date, don't fabricate a fill.
     unrealized=qty*(float(d.Close.iloc[-1])-entry)
