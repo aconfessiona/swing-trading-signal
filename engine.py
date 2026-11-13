@@ -401,3 +401,120 @@ def simulate_held_position(d, entry_date, fee_rate=.00015, slippage=.0005):
     # If a signal is pending on the last date, don't fabricate a fill.
     unrealized=qty*(float(d.Close.iloc[-1])-entry)
     return events, {'entry':entry,'remaining':qty,'realized_pnl_per_initial_share':realized-entry*fee_rate,'unrealized_pnl_per_initial_share':unrealized,'pending':pending}
+
+# 5.3: separate diagnostic sell opportunities from position executions.
+VERSION = '5.3-C-BB-SELL-OPPORTUNITIES'
+
+def analyze_53(raw, **settings):
+    d = analyze_51(raw, **settings)
+    d['early_exit'] = False
+    d['second_exit'] = False
+    d['sell_confirm'] = False
+    d['sell_candidate_type'] = ''
+    d['sell_reason'] = ''
+    d['sell_candidate_score'] = 0
+    d['sell_block_reason'] = ''
+    # State per upward swing: no repeated signal while price oscillates in one zone.
+    last_event_i = -1000
+    last_event_high = np.nan
+    last_event_low = np.nan
+    last_event_type = ''
+    for i in range(100, len(d)):
+        r = d.iloc[i]
+        idx = d.index[i]
+        atr = float(r.ATR) if pd.notna(r.ATR) else np.nan
+        if not np.isfinite(atr) or atr <= 0 or pd.isna(r.BB_upper):
+            continue
+        bb_upper = float(r.BB_upper)
+        touch = float(r.High) >= bb_upper * .985
+        # Only resistances that were known at the close, including the current bar.
+        levels = [float(r[k]) for k in ('short_resistance','mid_resistance','long_resistance') if pd.notna(r[k])]
+        near = bool(levels and any(abs(float(r.High)-v) <= .75*atr for v in levels))
+        rsi = float(r.RSI14) if pd.notna(r.RSI14) else 50.
+        fading = bool(r.hist_fading2)
+        reentry = bool(r.bb_reentry)
+        reversal = bool(r.bearish_break or reentry)
+        range_like = str(r.regime) in ('RANGE','NEUTRAL') or (pd.notna(r.ADX) and float(r.ADX)<18 and str(r.regime)!='UP')
+        strong = bool(r.strong_protect)
+        # This is a candidate signal, not a fill or prediction of the top.
+        if range_like:
+            score = int(touch)*2 + int(near) + int(rsi>=60) + int(fading) + int(reversal)
+            proactive = touch and (rsi>=60 or near) and score>=3
+        elif strong:
+            score = int(touch) + int(near)*2 + int(rsi>=75) + int(fading) + int(reversal)
+            proactive = touch and near and rsi>=75 and fading and score>=5
+        else:
+            score = int(touch)*2 + int(near) + int(rsi>=65) + int(fading) + int(reversal)
+            proactive = touch and (rsi>=65 or near) and (fading or near) and score>=4
+        reactive = (touch or near or (i>0 and bool(d.sell_watch.iloc[i-1]))) and reversal and (fading or near)
+        d.at[idx,'sell_candidate_score'] = score
+        # A new wave requires a reset below MA20 or a fresh 1.2 ATR extension.
+        new_wave = (np.isfinite(last_event_high) and float(r.High)>last_event_high+1.2*atr and i-last_event_i>=5)
+        reset = (np.isfinite(last_event_low) and i-last_event_i>=8 and
+                 d.Close.iloc[max(0,last_event_i+1):i].lt(d.MA20.iloc[max(0,last_event_i+1):i]).sum()>=3)
+        rearmed = last_event_i<0 or ((i-last_event_i)>=10 and (new_wave or reset))
+        if not rearmed:
+            d.at[idx,'sell_block_reason']='동일 상승 파동 중복 후보 제한'
+            continue
+        if proactive:
+            d.at[idx,'early_exit']=True
+            d.at[idx,'sell_confirm']=True
+            d.at[idx,'sell_candidate_type']='선제 익절 후보'
+            d.at[idx,'sell_reason']=f'볼린저 상단 접근 · RSI {rsi:.1f} · 저항 중첩 {"예" if near else "아니오"} · 모멘텀 둔화 {"예" if fading else "아니오"}'
+        elif reactive and not strong:
+            d.at[idx,'second_exit']=True
+            d.at[idx,'sell_confirm']=True
+            d.at[idx,'sell_candidate_type']='반락 익절 후보'
+            d.at[idx,'sell_reason']='볼린저 상단/저항 접근 후 가격 반락 및 모멘텀 둔화'
+        elif strong:
+            d.at[idx,'sell_block_reason']='밴드 워크 보호'
+        else:
+            d.at[idx,'sell_block_reason']='과열·저항·반락 조건 부족'
+        if bool(d.at[idx,'sell_confirm']):
+            last_event_i=i
+            last_event_high=float(r.High)
+            last_event_low=float(r.Low)
+            last_event_type=str(d.at[idx,'sell_candidate_type'])
+    return d
+
+
+def simulate_held_position_53(d, entry_date, fee_rate=.00015, slippage=.0005):
+    """Next-open entry and fills, initial-share 30/30/40; protective stop active from prior close."""
+    entry_loc=d.index.searchsorted(pd.Timestamp(entry_date),side='right')
+    if entry_loc>=len(d):raise ValueError('선택 날짜 이후 거래일이 없습니다.')
+    entry=float(d.Open.iloc[entry_loc])*(1+slippage)
+    atr=float(d.ATR.iloc[entry_loc])
+    if not np.isfinite(atr) or atr<=0:raise ValueError('진입일 ATR 계산 불가')
+    stop=entry-2*atr
+    qty=1.;sold=0.;realized=-entry*fee_rate
+    pending=None;first_exit_high=np.nan;first_exit_i=-1
+    events=[{'date':d.index[entry_loc],'action':'가상 진입','price':entry,'fraction':0.,'reason':'선택일 다음 시가 · 매수 신호 아님'}]
+    for i in range(entry_loc+1,len(d)):
+        r=d.iloc[i];idx=d.index[i];op=float(r.Open);low=float(r.Low)
+        # Stop is based only on the previous session's information.
+        if op<=stop or low<=stop:
+            price=min(op,stop)*(1-slippage)
+            realized+=qty*(price-entry)-qty*price*fee_rate
+            events.append({'date':idx,'action':'보호 청산','price':price,'fraction':qty,'reason':'기존 손절/추적 손절선 도달'})
+            qty=0.;pending=None;break
+        if pending is not None:
+            fraction=min(qty,pending['fraction']);price=op*(1-slippage)
+            realized+=fraction*(price-entry)-fraction*price*fee_rate
+            qty-=fraction;sold+=fraction
+            events.append({'date':idx,'action':pending['action'],'price':price,'fraction':fraction,'reason':pending['reason']})
+            if pending['action']=='1차 매도 30%':
+                first_exit_high=pending['signal_high'];first_exit_i=i
+            pending=None
+        if qty<=1e-8:break
+        # Effective next trading session; never backdate today's stop.
+        if pd.notna(r.last_low) and pd.notna(r.ATR):
+            stop=max(stop,float(r.last_low)-.5*float(r.ATR))
+        risk_off=(pd.notna(r.last_low) and r.Close<r.last_low*.99) or (i>=2 and all(d.Close.iloc[j]<d.MA20.iloc[j] for j in range(i-2,i+1)) and r.regime in ('DOWN','WEAK'))
+        if risk_off:
+            pending={'action':'보호 청산','fraction':qty,'reason':'종가 기준 구조 훼손','signal_high':float(r.High)}
+        elif sold<.3-1e-8 and bool(r.sell_confirm):
+            pending={'action':'1차 매도 30%','fraction':.3,'reason':str(r.sell_reason),'signal_high':float(r.High)}
+        elif .3-1e-8<=sold<.6-1e-8 and bool(r.sell_confirm) and i>first_exit_i+2 and np.isfinite(first_exit_high) and r.High>first_exit_high+float(r.ATR):
+            pending={'action':'2차 매도 30%','fraction':.3,'reason':'새 상승 확장 후 별도 매도 후보','signal_high':float(r.High)}
+    unrealized=qty*(float(d.Close.iloc[-1])-entry)
+    return events,{'entry':entry,'remaining':qty,'realized_pnl_per_initial_share':realized,'unrealized_pnl_per_initial_share':unrealized,'pending':pending}

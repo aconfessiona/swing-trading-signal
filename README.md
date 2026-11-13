@@ -1,20 +1,15 @@
-# Swing Analysis 5.2 — C Mixed Early Exit
+# Swing Analysis 5.3 — C Mixed BB Sell Opportunities
 
-Four-file Streamlit application. Upload app.py, engine.py, requirements.txt, README.md together to GitHub repository root.
+## Upload to GitHub
+Replace all four files in the repository root: `app.py`, `engine.py`, `requirements.txt`, `README.md`.
+Commit: `Add Swing Analysis 5.3 deduplicated sell opportunities and next-open fills`
 
-## Changes from 5.1
-- Remove repetitive sell-watch circles from the chart. Sell watch remains available in diagnostics.
-- Proactive first 30% exit candidate at Bollinger upper / resistance with RSI or structural confluence; stricter in protected band walks.
-- Separate second exit candidate after a new price extension and subsequent reversal.
-- Display only current three resistance levels, not historical stair-step traces. These are current levels and MUST NOT be interpreted as historical levels.
-- Protective exit overrides partial exits; daily close signal -> next open simulation.
+## Changes
+- Independent sell-opportunity markers across the entire chart, even before a selected virtual entry.
+- Proactive Bollinger upper-band/RSI/resistance and reactive reversal candidates.
+- Strong-trend band-walk protection and per-wave deduplication.
+- Simulated 30% / 30% / remaining 40% exits, based on next-day open and protective stops.
+- Diagnostic table of candidate dates and reasons.
 
-## Limitations
-This is experimental, not a validated trading strategy. No real buy signals or real orders. The 30/30/40 simulation assumes a manually selected hypothetical entry. Structural resistance is based on confirmed daily pivot highs, not actual volume profile or weekly pivots. No claim of optimal peak timing. Review historical diagnostics and transaction costs before using for decisions.
-
-## Install
-`pip install -r requirements.txt`
-`streamlit run app.py`
-
-## Deploy
-Replace all four files together, commit: `Add Swing Analysis 5.2 early exits and declutter sell markers`
+## Cautions
+Signals are exploratory and not validated for profitability. A virtual entry is not a confirmed buy signal. Resistance is based on confirmed daily pivots, not true volume-profile or weekly resistance. OHLC daily data cannot establish exact intraday sequence if stop and other prices are crossed in the same bar; protective stop takes priority. No future bars are used in signal calculations.
